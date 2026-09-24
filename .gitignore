@@ -1,0 +1,17 @@
+# Generated dataset (reproducible via src/data_generation/generate_data.py)
+data/raw/*.csv
+
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging / tooling caches
+*.egg-info/
+.mypy_cache/
+.ruff_cache/

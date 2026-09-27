@@ -221,6 +221,57 @@ overnight `SHIFT_03` from a time-of-day comparison alone. Additional
 indexes are not presumed necessary; use `EXPLAIN (ANALYZE, BUFFERS)` on
 representative queries before adding any.
 
+## SPC rules (initial Phase I analysis)
+
+[`sql/analysis/spc_rules.sql`](../sql/analysis/spc_rules.sql) applies the
+first individual/moving-range (I-MR) analysis to `BOOTH_01` and `A-L1`
+using `v_measurement_enriched` as its measurement source. Its process
+stream is identified by booth, measurement point, specification, and
+actual shift instance. Observations are deterministically ordered by
+`measurement_timestamp, measurement_id`.
+
+The batch start timestamp is not itself the shift boundary: each actual
+shift contains multiple batches, and `shift_id` recurs on later production
+days. The analysis combines `shift_id` with the scheduled shift start
+reconstructed from `dim_shift.start_time` / `end_time` and `batch_start`.
+For an overnight shift, a post-midnight batch belongs to the shift that
+started on the prior date. Moving ranges and every sequential rule
+partition by this actual shift-instance key. The first measurement in
+each instance has a NULL moving range; subsequent ranges are the absolute
+difference from the previous ordered observation in that same instance.
+
+The center line is the mean of the selected observations. The I-chart
+sigma estimate is average within-instance moving range divided by 1.128;
+limits are `CL +/- 3 * sigma_hat`. The moving-range average pools adjacent
+within-shift pairs across the selected history. These limits are SPC
+control limits, not specification limits: LSL and USL are not used to
+estimate them or generate signals.
+
+The four rules use strict beyond-zone comparisons:
+
+- Rule 1 signals an observation strictly beyond either 3-sigma control limit.
+- Rule 2 signals when at least 2 of 3 consecutive observations are strictly
+  beyond the same-side 2-sigma zone.
+- Rule 3 signals when at least 4 of 5 consecutive observations are strictly
+  beyond the same-side 1-sigma zone.
+- Rule 4 signals from the eighth consecutive observation on one side of the
+  center line. An observation exactly on the center line resets the run.
+
+The output includes one row per measurement, individual rule flags, and an
+overall `spc_signal` flag that is true when any rule signals at that
+measurement. Rules 2-4 signal on the observation that completes the
+threshold and on subsequent observations while the qualifying window/run
+continues. `sql/analysis/test_spc_rules.sql` exercises threshold, side,
+boundary, reset, moving-range, and deterministic-order behavior with
+inline SQL fixtures.
+
+This is an exploratory Phase I baseline estimated from the same full
+selected history being assessed. Its center line and sigma can therefore
+be influenced by special causes; a reviewed stable reference period and
+fixed Phase II limits would be needed for production monitoring. The
+detector does not read `fact_process_event`; that synthetic ground truth
+is reserved for retrospective validation after signals are produced.
+
 ## Phase 4 owner review
 
 Before relying on or extending the SQL, make sure you can explain:

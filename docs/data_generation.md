@@ -16,7 +16,10 @@ fully synthetic, reproducible dataset is generated in Python
   a known answer key.
 
 The schema and seed data are treated as fixed inputs and are **not**
-modified by the generator.
+modified by the generator. For the canonical clean-load workflow, the
+generated CSVs are the dataset source of truth. `sql/seed.sql` is a
+separate reference-data workflow and must not be run into the same clean
+database as the CSV import.
 
 ## Production assumptions
 
@@ -140,7 +143,103 @@ Primary-key columns (e.g. `booth_id`, `cabin_id`, `measurement_id`) are
 included explicitly in the CSVs so foreign keys across files stay
 consistent; when loading into Postgres against the `GENERATED ALWAYS`
 identity columns, use `INSERT ... OVERRIDING SYSTEM VALUE` (or load in
-a way that preserves the given ids).
+a way that preserves the given ids). The canonical importer is
+[`sql/load.sql`](../sql/load.sql); it imports all 11 CSV files and does
+not run `seed.sql`.
+
+## PostgreSQL Phase 4 workflow
+
+The reproducible clean-load order is:
+
+1. Create an empty database.
+2. Apply `sql/schema.sql`.
+3. Import the generated CSV files with `sql/load.sql`.
+4. Run `sql/test.sql` and inspect the reconciliation/invariant results.
+5. Create reusable analytics views with `sql/views.sql`.
+6. Run the ad-hoc analyses in `sql/analysis/`.
+
+Do not apply `sql/seed.sql` as part of this workflow. It is retained as a
+separate reference/seed workflow. `sql/load.sql` refuses to load when
+target tables already contain rows, protecting against mixing seed rows
+with CSV data and against accidental duplicate imports.
+
+The importer uses `psql` client-side `\copy`, so PostgreSQL does not
+need server-side access to the CSV directory. Its CSV paths are relative
+to the `psql` working directory, not embedded as machine-specific paths
+in SQL. From the repository root in PowerShell, set the connection
+environment (for example `PGDATABASE`) and run:
+
+```powershell
+psql -X -v ON_ERROR_STOP=1 -d $env:PGDATABASE -f sql/schema.sql
+Push-Location data/raw
+psql -X -v ON_ERROR_STOP=1 -d $env:PGDATABASE -f ../../sql/load.sql
+Pop-Location
+psql -X -v ON_ERROR_STOP=1 -d $env:PGDATABASE -f sql/views.sql
+```
+
+The connection can be configured with normal PostgreSQL environment
+variables or a `psql` service file. Choose an empty database; do not use
+the existing seeded/reference database for the canonical CSV import.
+The loader stages every CSV, inserts in foreign-key order while
+preserving identity IDs, synchronizes identity sequences, runs
+`sql/test.sql` against both staging and loaded tables, and commits only
+if the checks pass.
+
+## Analytics grains and quality semantics
+
+[`sql/views.sql`](../sql/views.sql) defines `v_measurement_enriched` at
+exactly one row per `fact_quality_measurement`, without robot or event
+joins. Aggregate views cover production volume, cabin, batch, booth,
+shift, measurement point, robot attribution, and retrospective event
+evaluation. Ad-hoc analyses are in `sql/analysis/`.
+
+The views distinguish specification compliance from process behavior.
+An OOS measurement is strictly below LSL or above USL; the limits
+themselves are in specification. OOS rates are measurement-level unless
+the query explicitly reports cabin-level OOS. Means and sample standard
+deviations are descriptive summaries, not SPC control limits or
+detection rules.
+
+Each quality fact row represents one measurement. The robot bridge
+represents 1-4 synthetic contributing-robot links per measurement and
+may link robots across different track axes within the cabin's booth.
+Robot views use distinct linked-measurement and linked-cabin counts and
+are attribution summaries only. They do not establish causal robot
+performance or physical robot-to-measurement-point mapping. Never join
+the bridge into a measurement-level aggregate without first restoring
+one row per measurement.
+
+`fact_process_event` is synthetic special-cause ground truth. It may be
+used for retrospective validation and event-period comparisons, but
+must not be an input to future SPC detection logic. Event-evaluation
+queries operate at event/batch grain so event rows do not multiply
+measurement counts.
+
+The schema's temporal columns are timezone-naive `timestamp` values.
+Shift assignment must come from `dim_batch.shift_id`; do not infer the
+overnight `SHIFT_03` from a time-of-day comparison alone. Additional
+indexes are not presumed necessary; use `EXPLAIN (ANALYZE, BUFFERS)` on
+representative queries before adding any.
+
+## Phase 4 owner review
+
+Before relying on or extending the SQL, make sure you can explain:
+
+- Why staging plus `OVERRIDING SYSTEM VALUE` preserves generated IDs,
+  why identity sequences need synchronization, and why the seed and CSV
+  workflows must remain separate.
+- What one row means at measurement, cabin, batch, and bridge grains;
+  how `COUNT(DISTINCT ...)` prevents robot-link fanout from inflating
+  counts; and which denominator each reported rate uses.
+- Why sample standard deviation, mean, min/max, and OOS rate answer
+  different questions, and why none of these summaries alone is an SPC
+  control rule.
+- Why specification compliance differs from process variation, and
+  why event ground truth is reserved for retrospective evaluation.
+- Why robot-linked results are attribution summaries only, and why
+  point-level robot ownership cannot be inferred from this dataset.
+- How `EXPLAIN (ANALYZE, BUFFERS)` demonstrates whether an additional
+  index is worth its storage and load cost.
 
 ## How to run the generator
 

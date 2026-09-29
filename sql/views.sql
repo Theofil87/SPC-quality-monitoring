@@ -216,6 +216,41 @@ SELECT
     (rule_1 OR rule_2 OR rule_3 OR rule_4) AS spc_signal
 FROM signals;
 
+CREATE OR REPLACE VIEW v_capability_measurements_booth01_a_l1 AS
+SELECT
+        measurement.measurement_id,
+        measurement.measurement_timestamp,
+        measurement.production_timestamp,
+        date_trunc('month', measurement.production_timestamp)::date AS production_month,
+        spc.shift_instance,
+        spc.shift_id,
+        spc.shift_name,
+        measurement.booth_name AS booth,
+        measurement.point_code AS measurement_point,
+        measurement.characteristic,
+        measurement.unit,
+        measurement.lsl,
+        measurement.target,
+        measurement.usl,
+        measurement.measured_value,
+        measurement.below_lsl,
+        measurement.above_usl,
+        measurement.is_oos,
+        spc.rule_1,
+        spc.rule_2,
+        spc.rule_3,
+        spc.rule_4,
+        spc.spc_signal
+FROM v_measurement_enriched AS measurement
+JOIN v_spc_rule_results_booth01_a_l1 AS spc USING (measurement_id)
+WHERE measurement.booth_name = 'BOOTH_01'
+    AND measurement.point_code = 'A-L1'
+    AND measurement.characteristic = 'Coating Thickness'
+    AND measurement.unit = 'um'
+    AND measurement.lsl = 70
+    AND measurement.target = 75
+    AND measurement.usl = 80;
+
 CREATE OR REPLACE VIEW v_production_volume AS
 SELECT
     production_date,

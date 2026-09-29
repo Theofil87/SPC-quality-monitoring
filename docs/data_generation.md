@@ -309,6 +309,81 @@ checks deterministic aggregation fixtures, and
 [`sql/analysis/validate_spc_signal_summary.sql`](../sql/analysis/validate_spc_signal_summary.sql)
 checks measurement grain and reconciliation on the loaded data.
 
+## Process capability (initial Phase I analysis)
+
+The first capability analysis is deliberately scoped to `BOOTH_01` / `A-L1`
+for Coating Thickness (`um`; LSL 70, target 75, USL 80). The SQL input view
+[`v_capability_measurements_booth01_a_l1`](../sql/views.sql) joins
+`v_measurement_enriched` to the existing SPC result by `measurement_id`,
+preserving one row per measurement and adding actual shift-instance and signal
+fields. It does not join robot or event tables. The ordered extraction is
+[`sql/analysis/capability_inputs.sql`](../sql/analysis/capability_inputs.sql);
+the view's grain, OOS counts/rate, and signal counts are checked by
+[`sql/analysis/validate_capability_inputs.sql`](../sql/analysis/validate_capability_inputs.sql).
+
+The canonical calculations are in [`src/capability.py`](../src/capability.py).
+Within-process sigma uses the existing I-MR moving-range method, with moving
+ranges ordered by `measurement_timestamp, measurement_id` and restricted to
+the same actual shift instance:
+
+```text
+within_sigma = MRbar / 1.128
+Cp  = (USL - LSL) / (6 * within_sigma)
+Cpk = min((USL - mean) / (3 * within_sigma), (mean - LSL) / (3 * within_sigma))
+```
+
+The first observation in each shift instance has no moving range and is
+excluded from the moving-range average. `MRbar` pools the remaining adjacent
+pairs across the selected stream, as in the existing chart. Overall sigma is
+the sample standard deviation (`ddof=1`):
+
+```text
+Pp  = (USL - LSL) / (6 * overall_sigma)
+Ppk = min((USL - mean) / (3 * overall_sigma), (mean - LSL) / (3 * overall_sigma))
+```
+
+Cp and Pp compare the specification width with spread and do not account for
+the mean's displacement from target. Cpk and Ppk use the nearer specification
+limit, so off-centering can make Cpk lower than Cp and Ppk lower than Pp. Pp
+can differ from Cp because overall standard deviation captures the observed
+history while I-MR sigma estimates short-term within-instance variation.
+
+Capability and compliance are different. OOS means strictly below LSL or
+strictly above USL; a measurement exactly at either limit is in specification.
+OOS rate uses all measurements in the selected stream as its denominator.
+Control limits are estimated from process behavior and used to assess stability;
+specification limits define acceptance and are not used to calculate SPC limits.
+A stable process can still be incapable if its stable distribution is too wide
+or poorly centered. Conversely, favorable capability indices from an unstable
+history do not establish future performance and do not remove the need to
+investigate signals.
+
+The selected full history contains SPC signals. Its indices are calculated
+without deleting signal-bearing observations and must be labeled
+**exploratory Phase I**. Signals are not confirmed special causes, but they
+mean stability has not been established. Classical Cp/Cpk/Pp/Ppk also assume a
+meaningful process distribution, conventionally normal for direct
+interpretation. Inspect the histogram and normal Q-Q plot, compare mean and
+median, and consider skewness; do not infer normality from the simulation model
+or treat a normality-test p-value as a sole decision rule. The first version
+does not use a non-normal capability method.
+
+Missing or inconsistent specification limits, fewer than two observations for
+overall sample sigma, no valid moving-range pair, zero sigma, and near-zero
+sigma are exposed as availability statuses. Capability values are unavailable
+when their required sigma cannot be estimated; infinity is never returned.
+The near-zero guard is 0.001 `um`, the stored measurement resolution in
+`NUMERIC(10,3)`, and can be revisited if measurement-system precision changes.
+Monthly, actual shift-instance, and shift-type outputs are descriptive only;
+they do not publish subgroup capability indices or impose an arbitrary minimum
+sample count.
+
+The analysis and deterministic hand-checks are in
+[`notebooks/process_capability_analysis.ipynb`](../notebooks/process_capability_analysis.ipynb),
+with regression tests in [`tests/test_capability.py`](../tests/test_capability.py).
+The dataset is synthetic and deliberately contains special causes; the results
+demonstrate method and reproducibility, not real-world process performance.
+
 ## Phase 4 owner review
 
 Before relying on or extending the SQL, make sure you can explain:

@@ -272,6 +272,43 @@ fixed Phase II limits would be needed for production monitoring. The
 detector does not read `fact_process_event`; that synthetic ground truth
 is reserved for retrospective validation after signals are produced.
 
+## SPC signal summary and diagnostics
+
+[`sql/views.sql`](../sql/views.sql) exposes the unchanged initial rule
+results as `v_spc_rule_results_booth01_a_l1`. It retains one row per
+eligible `measurement_id`; [`sql/analysis/spc_rules.sql`](../sql/analysis/spc_rules.sql)
+is the ordered detail query over that view. The summary in
+[`sql/analysis/spc_signal_summary.sql`](../sql/analysis/spc_signal_summary.sql)
+joins those rows to `v_measurement_enriched` by `measurement_id` for OOS
+status and production timestamp. No robot bridge or event table is joined.
+
+The summary reports overall stream totals, production-month totals, and
+actual shift-instance totals. A month is derived from
+`production_timestamp`. Shift results group by the existing reconstructed
+`shift_instance` together with `shift_id` and `shift_name`; `shift_id`
+alone repeats across production days and is not a concrete shift key.
+Rule-specific results are long-form for Rules 1-4 at overall, month, and
+shift-instance scope.
+
+All counts use distinct `measurement_id`; rates use the total eligible
+measurements in the corresponding scope as their denominator. Overall
+signal status is the OR of Rules 1-4, so a measurement triggering multiple
+rules counts once in the overall signal count. Individual rule counts
+are allowed to overlap and must not be added to estimate the total signal
+count. OOS measurements and rates use `is_oos` independently of SPC rule
+flags; an OOS result is not required for a signal, nor does an SPC signal
+imply an OOS result.
+
+An SPC signal means that one or more configured rules flagged an
+observation under the exploratory Phase I limits. It is a diagnostic
+prompt for investigation, not proof of a special cause or evidence of a
+specific root cause. `fact_process_event` remains reserved for subsequent
+retrospective validation and is not an input to detection or aggregation.
+[`sql/analysis/test_spc_signal_summary.sql`](../sql/analysis/test_spc_signal_summary.sql)
+checks deterministic aggregation fixtures, and
+[`sql/analysis/validate_spc_signal_summary.sql`](../sql/analysis/validate_spc_signal_summary.sql)
+checks measurement grain and reconciliation on the loaded data.
+
 ## Phase 4 owner review
 
 Before relying on or extending the SQL, make sure you can explain:

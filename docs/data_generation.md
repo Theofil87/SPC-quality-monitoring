@@ -384,6 +384,83 @@ with regression tests in [`tests/test_capability.py`](../tests/test_capability.p
 The dataset is synthetic and deliberately contains special causes; the results
 demonstrate method and reproducibility, not real-world process performance.
 
+## Drift and shift-to-shift variation analysis
+
+[`sql/analysis/drift_shift_inputs.sql`](../sql/analysis/drift_shift_inputs.sql)
+extracts the additive, one-row-per-measurement contract from
+`v_drift_shift_measurements_booth01_a_l1`. The contract is deliberately based
+on the validated capability stream and carries forward its existing OOS and
+SPC flags. It does not join `fact_process_event`, robot tables, or other
+potential explanatory labels.
+
+An **actual shift instance** is one concrete scheduled shift occurrence,
+identified by `shift_instance`. In particular, `SHIFT_03` is anchored to its
+scheduled 22:00 start even when observations occur after midnight. A **shift
+type** (`SHIFT_01`, `SHIFT_02`, or `SHIFT_03`) repeats over many production
+days. Analyses that group actual shift instances must not group by shift type
+alone.
+
+[`sql/analysis/drift_shift_summaries.sql`](../sql/analysis/drift_shift_summaries.sql)
+provides reproducible monthly, actual-shift-instance, and shift-type outputs,
+plus sufficient statistics for variation decomposition. Each rate uses the
+measurement count in that same scope as its denominator. A rule-specific count
+may overlap another rule; `spc_signal` remains the existing OR flag and is the
+only overall-signal count.
+
+The Python diagnostics in
+[`src/drift_shift_analysis.py`](../src/drift_shift_analysis.py) are separate
+from `calculate_capability()`. They calculate descriptive summaries, rolling
+actual-shift means, chronological-half comparisons, OLS trend diagnostics, and
+the exact one-way shift-instance sums-of-squares identity:
+
+```text
+Total SS = Within-shift SS + Between-shift SS
+```
+
+The pooled within-shift standard deviation is calculated from deviations of
+measurements around their own actual-shift mean. It is useful for describing
+within-shift dispersion, but it is **not** the existing I-MR within sigma.
+I-MR within sigma uses adjacent moving ranges, ordered within each actual shift
+instance, divided by `d2 = 1.128`. Overall sigma is the sample standard
+deviation of the complete selected history and therefore can include both
+within-shift dispersion and differences among actual-shift centers.
+
+This relationship gives a data-driven route to investigating why Cp can exceed
+Pp and Cpk can exceed Ppk: the new analysis measures observed within-shift,
+between-shift, and time-associated contributions, rather than assuming a
+particular root cause. It does not change the capability indices or claim that
+a component of variance is a causal mechanism.
+
+Trend diagnostics use actual-shift-instance means as their primary time unit.
+They include trailing 7-, 14-, and 21-instance rolling means, an OLS slope,
+normal-approximation slope confidence interval, fitted cumulative change,
+first-half/second-half comparison, and leave-one-shift-out slope sensitivity.
+A pattern is described as evidence consistent with sustained drift only when
+all predeclared criteria are compatible: directional slope uncertainty,
+practically meaningful fitted change, compatible half comparison, persistent
+rolling direction, and no complete reliance on an isolated shift. Even then it
+is an observational result, not confirmed causal drift; the practical-change
+threshold requires Quality Engineer review.
+
+SPC signals are retained in every descriptive, decomposition, and trend
+calculation. They are overlaid only as pre-existing investigation prompts;
+they are not recomputed, used to exclude data, or treated as confirmed special
+causes. `fact_process_event` remains reserved for a separately labeled
+retrospective interpretation, if one is later requested.
+
+Autocorrelation can make conventional independent-observation regression or
+ANOVA uncertainty too optimistic. Shift type can also be confounded with time
+or unmeasured production conditions, and multiple monthly/shift comparisons
+can surface chance patterns. The synthetic dataset contains deliberately
+injected behavior, so this layer validates an analytical workflow rather than
+making claims about an operating paintshop.
+
+[`notebooks/drift_shift_variation_analysis.ipynb`](../notebooks/drift_shift_variation_analysis.ipynb)
+is the reproducible walkthrough. Its SQL and Python assertions require 4,650
+unique measurements, 465 actual instances of 10 measurements, 56 OOS results,
+174 signal-bearing measurements, reconciliation across all groupings, correct
+overnight assignment, and `Total SS ≈ Within SS + Between SS`.
+
 ## Phase 4 owner review
 
 Before relying on or extending the SQL, make sure you can explain:

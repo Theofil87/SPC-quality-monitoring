@@ -251,6 +251,38 @@ WHERE measurement.booth_name = 'BOOTH_01'
     AND measurement.target = 75
     AND measurement.usl = 80;
 
+-- Read-only input contract for descriptive drift and shift-to-shift analysis.
+-- It intentionally reuses the validated capability stream and its immutable
+-- SPC flags. shift_instance is the existing scheduled-start definition,
+-- including the overnight SHIFT_03 handling in the SPC result view.
+CREATE OR REPLACE VIEW v_drift_shift_measurements_booth01_a_l1 AS
+SELECT
+    measurement_id,
+    measurement_timestamp,
+    production_timestamp,
+    production_month,
+    shift_instance,
+    shift_id,
+    shift_name,
+    booth,
+    measurement_point,
+    characteristic,
+    unit,
+    lsl,
+    target,
+    usl,
+    measured_value,
+    measured_value - target AS deviation_from_target,
+    below_lsl,
+    above_usl,
+    is_oos,
+    rule_1,
+    rule_2,
+    rule_3,
+    rule_4,
+    spc_signal
+FROM v_capability_measurements_booth01_a_l1;
+
 CREATE OR REPLACE VIEW v_production_volume AS
 SELECT
     production_date,

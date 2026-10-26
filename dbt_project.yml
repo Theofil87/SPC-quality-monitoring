@@ -1,0 +1,16 @@
+name: spc_quality_monitoring
+version: "1.0.0"
+config-version: 2
+
+profile: spc_quality_monitoring
+
+model-paths: ["models"]
+test-paths: ["tests/dbt"]
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  spc_quality_monitoring:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: view

@@ -1,0 +1,21 @@
+version: 2
+
+sources:
+  - name: paintshop
+    description: Canonical PostgreSQL load created by sql/schema.sql and sql/load.sql.
+    schema: public
+    tables:
+      - name: fact_quality_measurement
+      - name: dim_cabin
+      - name: dim_batch
+      - name: dim_booth
+      - name: dim_shift
+      - name: dim_measurement_point
+      - name: dim_specification
+      - name: bridge_measurement_robot
+      - name: dim_robot
+      - name: dim_track_axis
+      - name: v_measurement_enriched
+        description: Canonical one-row-per-measurement SQL enrichment view.
+      - name: v_spc_rule_results_booth01_a_l1
+        description: Existing SQL SPC output; dbt consumes it and does not recalculate rules.

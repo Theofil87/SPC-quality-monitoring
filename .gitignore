@@ -15,3 +15,9 @@ env/
 *.egg-info/
 .mypy_cache/
 .ruff_cache/
+
+# dbt build artifacts and local profiles (profiles may contain credentials)
+target/
+dbt_packages/
+logs/
+profiles.yml

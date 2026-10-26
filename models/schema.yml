@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: stg_quality_measurements
+    description: Measurement-grain staging model with specification compliance fields.
+    columns:
+      - name: measurement_id
+        tests: [not_null, unique]
+      - name: cabin_id
+        tests: [not_null]
+      - name: measured_value
+        tests: [not_null]
+      - name: is_oos
+        tests: [not_null]
+
+  - name: mart_measurements
+    description: Conformed one-row-per-measurement mart.
+    columns:
+      - name: measurement_id
+        tests: [not_null, unique]
+
+  - name: mart_quality_metrics
+    description: Daily booth quality metrics.
+    columns:
+      - name: measurement_count
+        tests: [not_null]
+      - name: oos_rate
+        tests: [not_null]
+
+  - name: mart_spc_metrics
+    description: Measurement-grain SPC mart backed by the established SQL rules.
+    columns:
+      - name: measurement_id
+        tests: [not_null, unique]
+      - name: spc_signal
+        tests: [not_null]

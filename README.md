@@ -18,12 +18,13 @@ For the analysed stream the answer is: **stability is not demonstrated** (SPC si
 
 - Reproducible synthetic data generator with automated tests (`src/data_generation/`)
 - PostgreSQL schema, clean CSV load, analytical views and SQL validation scripts (`sql/`)
+- dbt staging model and measurement, quality, and SPC marts (`models/`; scaffolded, pending first authenticated `dbt build`)
 - I-MR SPC rule detection and signal summaries in SQL
 - Process capability (Cp / Cpk / Pp / Ppk) in Python with a hand-checked fixture
 - Drift and shift-to-shift variation analysis on actual shift instances
 - 44 Python tests plus SQL regression fixtures
 
-Not implemented: a dashboard or Streamlit app, and root-cause analysis. The `fact_process_event` ground truth is not used by the analysis notebooks.
+Not implemented: a dashboard or Streamlit app, and root-cause analysis. The `fact_process_event` ground truth is not used by the analysis notebooks or dbt models.
 
 ## 🏭 Manufacturing Context
 
@@ -43,6 +44,9 @@ Synthetic data generator (Python, fixed seed)
             │  CSV files in data/raw/
             ▼
    PostgreSQL (schema.sql, load.sql, views.sql)
+            │
+            ▼
+ dbt: staging + measurement / quality / SPC marts
             │
             ▼
    SQL: I-MR SPC rules, signal summary, validation
@@ -138,6 +142,10 @@ psql -X -v ON_ERROR_STOP=1 -d spc_quality_monitoring -f sql/views.sql
 
 # 5. Tests
 python -m pytest tests/ -q
+
+# 6. dbt (create ~/.dbt/profiles.yml from profiles.yml.example; keep credentials outside Git)
+dbt debug
+dbt build
 ```
 
 Optional SQL checks: run `sql/analysis/test_*.sql` (regression fixtures) and `sql/analysis/validate_*.sql` (live reconciliation) with `psql` in the same way.
@@ -153,6 +161,7 @@ SPC-quality-monitoring/
 ├── data/raw/        generated CSVs (git-ignored)
 ├── docs/            data generation and methodology / data model
 ├── notebooks/       capability and drift / shift analyses
+├── models/           dbt staging and mart models
 ├── sql/             schema, load, views, analysis and validation scripts
 ├── src/             data generator, capability and drift / shift code
 ├── tests/           pytest suite

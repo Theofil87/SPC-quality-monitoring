@@ -1,0 +1,30 @@
+-- One row per canonical measurement from the validated SQL enrichment view.
+-- This model does not use process events.
+select
+    measurement_id,
+    cabin_id,
+    batch_id,
+    shift_id,
+    shift_name,
+    booth_id,
+    booth_name,
+    production_timestamp,
+    production_date,
+    measurement_timestamp,
+    measurement_point_id,
+    point_code,
+    component,
+    side,
+    point_number,
+    specification_id,
+    characteristic,
+    unit,
+    lsl,
+    target,
+    usl,
+    measured_value,
+    deviation_from_target,
+    below_lsl,
+    above_usl,
+    is_oos
+from {{ source('paintshop', 'v_measurement_enriched') }}

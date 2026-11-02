@@ -4,3 +4,7 @@ matplotlib>=3.8
 pytest>=8.0
 ipykernel>=6.29
 dbt-postgres>=1.8,<2.0
+streamlit
+plotly
+sqlalchemy
+psycopg2-binary

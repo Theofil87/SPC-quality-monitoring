@@ -9,6 +9,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.spc_monitoring import summarize_mr_violations
+
 
 st.set_page_config(
     page_title="SPC & Quality Monitoring",
@@ -200,33 +202,58 @@ if dashboard_section == "SPC monitoring":
 
     st.divider()
     st.subheader("MR-Chart")
-    valid_moving_ranges = pd.to_numeric(
-        spc_df["moving_range"], errors="coerce"
-    ).dropna()
-    if valid_moving_ranges.empty:
+    mr_summary = summarize_mr_violations(spc_df["moving_range"])
+    spc_df["mr_violation"] = mr_summary.violations
+    if mr_summary.valid_count == 0:
         st.info("No valid moving-range values are available to calculate MR limits.")
-        mr_center_line = None
-    else:
-        mr_center_line = float(valid_moving_ranges.mean())
-        mr_ucl = 3.267 * mr_center_line
-        mr_lcl = 0.0 * mr_center_line
 
     mr_chart = go.Figure()
     mr_chart.add_trace(
         go.Scatter(
             x=spc_df["measurement_timestamp"],
-            y=spc_df["moving_range"],
+            y=mr_summary.values,
             mode="lines",
             name="Moving range",
             line={"color": "#2b6cb0", "width": 1.5},
             connectgaps=False,
         )
     )
-    if mr_center_line is not None:
+    violation_rows = spc_df.loc[spc_df["mr_violation"]]
+    mr_chart.add_trace(
+        go.Scatter(
+            x=violation_rows["measurement_timestamp"],
+            y=mr_summary.values.loc[violation_rows.index],
+            mode="markers",
+            name="MR violations (> UCL)",
+            marker={
+                "color": "#d62728",
+                "symbol": "triangle-up",
+                "size": 10,
+                "line": {"width": 1, "color": "white"},
+            },
+            customdata=violation_rows[["measurement_id"]],
+            hovertemplate=(
+                "%{x}<br>Moving range: %{y}<br>"
+                "Measurement ID: %{customdata[0]}<br>"
+                "MR violation: above UCL<extra></extra>"
+            ),
+        )
+    )
+    if mr_summary.center_line is not None:
         for label, value, color, dash in (
-            ("MR center line (average)", mr_center_line, "#2f855a", "solid"),
-            ("MR UCL (D4 = 3.267)", mr_ucl, "#c53030", "dash"),
-            ("MR LCL (D3 = 0)", mr_lcl, "#c53030", "dash"),
+            ("MR center line (average)", mr_summary.center_line, "#2f855a", "solid"),
+            (
+                "MR UCL (D4 = 3.267)",
+                mr_summary.upper_control_limit,
+                "#c53030",
+                "dash",
+            ),
+            (
+                "MR LCL (D3 = 0)",
+                mr_summary.lower_control_limit,
+                "#c53030",
+                "dash",
+            ),
         ):
             mr_chart.add_hline(
                 y=value,
@@ -247,8 +274,23 @@ if dashboard_section == "SPC monitoring":
         alt="Moving-range chart with the average moving range and calculated MR control limits.",
     )
     st.caption(
-        "MR limits use the average of valid moving ranges with D3 = 0 and "
-        "D4 = 3.267. I-chart SPC rule flags are not MR-chart violation flags."
+        "An MR violation is a moving range above its UCL, indicating unusually "
+        "large change between consecutive observations. These are separate "
+        "from the I-chart SPC rule flags."
+    )
+    mr_kpis = st.columns(3)
+    mr_kpis[0].metric("MR violations", f"{mr_summary.violation_count:,}")
+    mr_kpis[1].metric(
+        "Valid MR observations above UCL",
+        (
+            f"{mr_summary.violation_rate_pct:.2f}%"
+            if mr_summary.violation_rate_pct is not None
+            else "N/A"
+        ),
+    )
+    mr_kpis[2].metric(
+        "Maximum moving range",
+        f"{mr_summary.maximum:.3f}" if mr_summary.maximum is not None else "N/A",
     )
 
     st.divider()

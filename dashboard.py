@@ -3,6 +3,7 @@ import os
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
@@ -19,6 +20,39 @@ st.title("SPC & Quality Monitoring")
 st.caption("Manufacturing quality analytics | Powder coating process")
 
 
+@st.cache_data(ttl=3600)
+def load_spc_results():
+    """Read the existing BOOTH_01 / A-L1 SPC results view."""
+    query = text("""
+        SELECT
+            measurement_timestamp,
+            measurement_id,
+            booth,
+            measurement_point,
+            shift_id,
+            shift_name,
+            shift_instance,
+            measured_value,
+            moving_range,
+            center_line,
+            sigma,
+            lcl,
+            ucl,
+            rule_1,
+            rule_2,
+            rule_3,
+            rule_4,
+            spc_signal
+        FROM v_spc_rule_results_booth01_a_l1
+        ORDER BY measurement_timestamp, measurement_id
+    """)
+
+    engine = get_engine()
+
+    with engine.connect() as connection:
+        return pd.read_sql_query(query, connection)
+
+
 @st.cache_resource
 def get_engine():
     """Create a PostgreSQL connection using environment settings."""
@@ -31,6 +65,240 @@ def get_engine():
         database=os.getenv("PGDATABASE", "spc_quality_monitoring"),
     )
     return create_engine(url, pool_pre_ping=True)
+
+
+dashboard_section = st.sidebar.radio(
+    "Dashboard section",
+    options=["Quality dashboard", "SPC monitoring"],
+    key="dashboard_section",
+)
+
+if dashboard_section == "SPC monitoring":
+    st.header("SPC monitoring")
+    st.info(
+        "Current scope: BOOTH_01 / A-L1 only. Other booths and "
+        "measurement points are not yet supported."
+    )
+
+    try:
+        with st.spinner("Loading SPC results from PostgreSQL..."):
+            spc_df = load_spc_results()
+    except (SQLAlchemyError, OSError, ValueError) as exc:
+        st.error("Could not load SPC results from PostgreSQL.")
+        st.caption(
+            "Check the PostgreSQL service, connection settings, "
+            "database permissions and whether the SPC results view exists."
+        )
+        with st.expander("Technical details"):
+            st.code(str(exc))
+        st.stop()
+
+    if spc_df.empty:
+        st.warning("The BOOTH_01 / A-L1 SPC results view contains no records.")
+        st.stop()
+
+    spc_df["measurement_timestamp"] = pd.to_datetime(
+        spc_df["measurement_timestamp"]
+    )
+    spc_df = spc_df.sort_values(
+        ["measurement_timestamp", "measurement_id"], kind="mergesort"
+    ).reset_index(drop=True)
+
+    rule_columns = ["rule_1", "rule_2", "rule_3", "rule_4"]
+    rule_labels = {
+        "rule_1": "Rule 1",
+        "rule_2": "Rule 2",
+        "rule_3": "Rule 3",
+        "rule_4": "Rule 4",
+    }
+    for column in rule_columns + ["spc_signal"]:
+        spc_df[column] = spc_df[column].fillna(False).astype(bool)
+
+    spc_df["triggered_rules"] = spc_df[rule_columns].apply(
+        lambda row: " + ".join(
+            rule_labels[column] for column in rule_columns if row[column]
+        ),
+        axis=1,
+    )
+
+    st.subheader("I-Chart")
+    st.caption(
+        "SQL-supplied Rule 1–4 signals are highlighted by their triggered "
+        "rule combination. The plotted rule flags are not recalculated here."
+    )
+
+    i_chart = go.Figure()
+    i_chart.add_trace(
+        go.Scatter(
+            x=spc_df["measurement_timestamp"],
+            y=spc_df["measured_value"],
+            mode="lines",
+            name="Measured value",
+            line={"color": "#2b6cb0", "width": 1.5},
+        )
+    )
+    for column, label, color, dash in (
+        ("center_line", "Center line", "#2f855a", "solid"),
+        ("ucl", "UCL", "#c53030", "dash"),
+        ("lcl", "LCL", "#c53030", "dash"),
+    ):
+        i_chart.add_trace(
+            go.Scatter(
+                x=spc_df["measurement_timestamp"],
+                y=spc_df[column],
+                mode="lines",
+                name=label,
+                line={"color": color, "dash": dash, "width": 1.5},
+            )
+        )
+
+    signal_rows = spc_df.loc[spc_df["spc_signal"]]
+    signal_combinations = sorted(signal_rows["triggered_rules"].unique())
+    marker_colors = [
+        "#d62728", "#ff7f0e", "#9467bd", "#8c564b", "#e377c2",
+        "#17becf", "#bcbd22", "#393b79", "#637939", "#8c6d31",
+        "#843c39", "#7b4173", "#3182bd", "#31a354", "#756bb1",
+    ]
+    marker_symbols = [
+        "circle", "square", "diamond", "cross", "x", "triangle-up",
+        "triangle-down", "star", "hexagon", "pentagon", "hourglass",
+        "bowtie", "hexagram", "triangle-left", "triangle-right",
+    ]
+    for index, combination in enumerate(signal_combinations):
+        points = signal_rows.loc[signal_rows["triggered_rules"] == combination]
+        i_chart.add_trace(
+            go.Scatter(
+                x=points["measurement_timestamp"],
+                y=points["measured_value"],
+                mode="markers",
+                name=combination,
+                marker={
+                    "color": marker_colors[index],
+                    "symbol": marker_symbols[index],
+                    "size": 10,
+                    "line": {"width": 1, "color": "white"},
+                },
+                customdata=points[["measurement_id"]],
+                hovertemplate=(
+                    "%{x}<br>Measured value: %{y}<br>"
+                    "Measurement ID: %{customdata[0]}<br>"
+                    f"Triggered: {combination}<extra></extra>"
+                ),
+            )
+        )
+    i_chart.update_layout(
+        xaxis_title="Measurement timestamp",
+        yaxis_title="Measured value",
+        hovermode="x unified",
+        legend_title="I-chart series and triggered rules",
+    )
+    st.plotly_chart(
+        i_chart,
+        width="stretch",
+        alt="I-chart showing measured values, center line, control limits and SPC rule signals.",
+    )
+
+    st.divider()
+    st.subheader("MR-Chart")
+    valid_moving_ranges = pd.to_numeric(
+        spc_df["moving_range"], errors="coerce"
+    ).dropna()
+    if valid_moving_ranges.empty:
+        st.info("No valid moving-range values are available to calculate MR limits.")
+        mr_center_line = None
+    else:
+        mr_center_line = float(valid_moving_ranges.mean())
+        mr_ucl = 3.267 * mr_center_line
+        mr_lcl = 0.0 * mr_center_line
+
+    mr_chart = go.Figure()
+    mr_chart.add_trace(
+        go.Scatter(
+            x=spc_df["measurement_timestamp"],
+            y=spc_df["moving_range"],
+            mode="lines",
+            name="Moving range",
+            line={"color": "#2b6cb0", "width": 1.5},
+            connectgaps=False,
+        )
+    )
+    if mr_center_line is not None:
+        for label, value, color, dash in (
+            ("MR center line (average)", mr_center_line, "#2f855a", "solid"),
+            ("MR UCL (D4 = 3.267)", mr_ucl, "#c53030", "dash"),
+            ("MR LCL (D3 = 0)", mr_lcl, "#c53030", "dash"),
+        ):
+            mr_chart.add_hline(
+                y=value,
+                line_color=color,
+                line_dash=dash,
+                annotation_text=label,
+                annotation_position="top left",
+            )
+    mr_chart.update_layout(
+        xaxis_title="Measurement timestamp",
+        yaxis_title="Moving range (2 observations)",
+        hovermode="x unified",
+        legend_title="MR-chart series",
+    )
+    st.plotly_chart(
+        mr_chart,
+        width="stretch",
+        alt="Moving-range chart with the average moving range and calculated MR control limits.",
+    )
+    st.caption(
+        "MR limits use the average of valid moving ranges with D3 = 0 and "
+        "D4 = 3.267. I-chart SPC rule flags are not MR-chart violation flags."
+    )
+
+    st.divider()
+    st.subheader("SPC rule summary")
+    rule_counts = {
+        rule_labels[column]: int(spc_df[column].sum()) for column in rule_columns
+    }
+    signal_count = int(spc_df["spc_signal"].sum())
+    signal_rate = signal_count / len(spc_df) * 100
+    summary_columns = st.columns(6)
+    for column, (label, count) in zip(
+        summary_columns,
+        [
+            *rule_counts.items(),
+            ("Observations with signal", signal_count),
+            ("Overall signal rate", f"{signal_rate:.2f}%"),
+        ],
+    ):
+        column.metric(label, f"{count:,}" if isinstance(count, int) else count)
+
+    st.divider()
+    st.subheader("Signal details")
+    if signal_rows.empty:
+        st.info("No observations in this view have an SPC signal.")
+    else:
+        signal_details = signal_rows[
+            [
+                "measurement_timestamp",
+                "measurement_id",
+                "measured_value",
+                "triggered_rules",
+                "spc_signal",
+            ]
+        ].rename(
+            columns={
+                "measurement_timestamp": "Timestamp",
+                "measurement_id": "Measurement ID",
+                "measured_value": "Measured value",
+                "triggered_rules": "Triggered SPC rules",
+                "spc_signal": "SPC signal status",
+            }
+        )
+        st.dataframe(
+            signal_details,
+            width="stretch",
+            hide_index=True,
+        )
+
+    st.caption("Data source: PostgreSQL view v_spc_rule_results_booth01_a_l1.")
+    st.stop()
 
 
 @st.cache_data(ttl=3600)

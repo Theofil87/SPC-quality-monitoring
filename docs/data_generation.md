@@ -272,6 +272,28 @@ fixed Phase II limits would be needed for production monitoring. The
 detector does not read `fact_process_event`; that synthetic ground truth
 is reserved for retrospective validation after signals are produced.
 
+For fixed baseline fitting, `fit_baseline` accepts a pandas DataFrame of
+complete records for one booth / point / specification with columns
+`booth_id`, `measurement_point_id`, `specification_id`,
+`measurement_timestamp`, `measurement_id`, `shift_instance`, and
+`measured_value`. It sorts records by timestamp and ID together. Timestamps
+must be timezone-naive local wall times, consistent with the measurement
+table; measurement IDs must be unique positive PostgreSQL BIGINT values.
+Scope IDs must be positive INTEGER values and identical across the frame.
+Each shift instance must be a `(shift_id, shift_instance_start)` tuple with
+a positive INTEGER ID and a valid timezone-naive scheduled start, using the
+same identity as the monitoring view. Measurements must be finite numeric
+values representable as `NUMERIC(10,3)` without rounding. Calculated limits
+are checked for `NUMERIC(14,6)` storage after six-decimal rounding. The
+function pools only consecutive within-instance moving
+ranges; singleton shifts contribute to the center line but not the MR
+average. At least one within-shift pair is required. Invalid or missing
+measurements, timestamps, IDs, and shift keys are rejected, not silently
+removed. Separate value and shift-key sequences are no longer accepted.
+Callers must still derive each shift's scheduled start from authoritative
+shift and batch data; the fitter cannot infer whether a supplied identity
+matches those source records.
+
 ## SPC signal summary and diagnostics
 
 [`sql/views.sql`](../sql/views.sql) exposes the unchanged initial rule

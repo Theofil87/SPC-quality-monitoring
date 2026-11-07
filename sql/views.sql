@@ -42,7 +42,7 @@ JOIN dim_booth AS booth USING (booth_id)
 JOIN dim_measurement_point AS point USING (measurement_point_id)
 JOIN dim_specification AS specification USING (specification_id);
 
-CREATE OR REPLACE VIEW v_spc_rule_results_booth01_a_l1 AS
+CREATE OR REPLACE VIEW v_spc_rule_results AS
 WITH source AS (
     SELECT
         measurement.measurement_id,
@@ -56,6 +56,13 @@ WITH source AS (
         measurement.batch_start,
         measurement.measurement_timestamp,
         measurement.measured_value,
+        baseline.baseline_id,
+        baseline.center_line::numeric AS center_line,
+        baseline.sigma::numeric AS sigma,
+        baseline.i_lcl::numeric AS i_lcl,
+        baseline.i_ucl::numeric AS i_ucl,
+        baseline.mr_center,
+        baseline.mr_ucl,
         (
             (measurement.batch_start::date + shift.start_time)
             - CASE
@@ -67,19 +74,77 @@ WITH source AS (
         ) AS shift_instance_start
     FROM v_measurement_enriched AS measurement
     JOIN dim_shift AS shift USING (shift_id)
-    WHERE measurement.booth_name = 'BOOTH_01'
-      AND measurement.point_code = 'A-L1'
-), ordered AS (
+    -- Measurement timestamps are local wall time; convert before comparing
+    -- them with the baseline's timezone-aware effective interval.
+    -- Retain one deterministic match if legacy periods overlap.
+    LEFT JOIN LATERAL (
+        SELECT candidate.*
+        FROM spc_baseline AS candidate
+        WHERE candidate.booth_id = measurement.booth_id
+          AND candidate.measurement_point_id = measurement.measurement_point_id
+          AND candidate.specification_id = measurement.specification_id
+          AND candidate.status IN ('ACTIVE', 'RETIRED')
+          AND candidate.effective_from
+                <= (
+                    measurement.measurement_timestamp
+                    AT TIME ZONE 'Europe/Budapest'
+                )
+          AND (
+                candidate.effective_to IS NULL
+                OR (
+                    measurement.measurement_timestamp
+                    AT TIME ZONE 'Europe/Budapest'
+                ) < candidate.effective_to
+          )
+        ORDER BY
+            candidate.effective_from DESC,
+            candidate.version DESC,
+            candidate.baseline_id DESC
+        LIMIT 1
+    ) AS baseline ON TRUE
+), baseline_changes AS (
     SELECT
         source.*,
+        lag(baseline_id) OVER (
+            PARTITION BY
+                booth_id,
+                measurement_point_id,
+                specification_id,
+                shift_id,
+                shift_instance_start
+            ORDER BY measurement_timestamp, measurement_id
+        ) AS previous_baseline_id
+    FROM source
+), baseline_segments AS (
+    SELECT
+        baseline_changes.*,
+        sum(
+            CASE WHEN baseline_id IS DISTINCT FROM previous_baseline_id
+                 THEN 1 ELSE 0 END
+        ) OVER (
+            PARTITION BY
+                booth_id,
+                measurement_point_id,
+                specification_id,
+                shift_id,
+                shift_instance_start
+            ORDER BY measurement_timestamp, measurement_id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS baseline_segment
+    FROM baseline_changes
+), ordered AS (
+    SELECT
+        baseline_segments.*,
         row_number() OVER stream_order AS observation_number,
         lag(measured_value) OVER stream_order AS previous_value
-    FROM source
+    FROM baseline_segments
     WINDOW stream_order AS (
         PARTITION BY
             booth_id,
             measurement_point_id,
             specification_id,
+            baseline_id,
+            baseline_segment,
             shift_id,
             shift_instance_start
         ORDER BY measurement_timestamp, measurement_id
@@ -92,32 +157,31 @@ WITH source AS (
             ELSE abs(measured_value - previous_value)
         END AS moving_range
     FROM ordered
-), baseline AS (
-    SELECT
-        booth_id,
-        measurement_point_id,
-        specification_id,
-        avg(measured_value) AS center_line,
-        avg(moving_range) / 1.128 AS sigma
-    FROM moving_ranges
-    GROUP BY booth_id, measurement_point_id, specification_id
 ), zoned AS (
     SELECT
         moving_ranges.*,
-        baseline.center_line,
-        baseline.sigma,
-        baseline.center_line - 3 * baseline.sigma AS lcl,
-        baseline.center_line + 3 * baseline.sigma AS ucl,
-        CASE WHEN moving_ranges.measured_value > baseline.center_line THEN 1
-             WHEN moving_ranges.measured_value < baseline.center_line THEN -1
+        CASE WHEN moving_ranges.baseline_id IS NULL THEN 0
+             WHEN moving_ranges.measured_value > moving_ranges.center_line THEN 1
+             WHEN moving_ranges.measured_value < moving_ranges.center_line THEN -1
              ELSE 0
         END AS center_line_side,
-        CASE WHEN moving_ranges.measured_value > baseline.center_line + 2 * baseline.sigma THEN 1 ELSE 0 END AS above_2_sigma,
-        CASE WHEN moving_ranges.measured_value < baseline.center_line - 2 * baseline.sigma THEN 1 ELSE 0 END AS below_2_sigma,
-        CASE WHEN moving_ranges.measured_value > baseline.center_line + baseline.sigma THEN 1 ELSE 0 END AS above_1_sigma,
-        CASE WHEN moving_ranges.measured_value < baseline.center_line - baseline.sigma THEN 1 ELSE 0 END AS below_1_sigma
+        CASE WHEN moving_ranges.baseline_id IS NOT NULL
+                   AND moving_ranges.measured_value
+                       > moving_ranges.center_line + 2 * moving_ranges.sigma
+             THEN 1 ELSE 0 END AS above_2_sigma,
+        CASE WHEN moving_ranges.baseline_id IS NOT NULL
+                   AND moving_ranges.measured_value
+                       < moving_ranges.center_line - 2 * moving_ranges.sigma
+             THEN 1 ELSE 0 END AS below_2_sigma,
+        CASE WHEN moving_ranges.baseline_id IS NOT NULL
+                   AND moving_ranges.measured_value
+                       > moving_ranges.center_line + moving_ranges.sigma
+             THEN 1 ELSE 0 END AS above_1_sigma,
+        CASE WHEN moving_ranges.baseline_id IS NOT NULL
+                   AND moving_ranges.measured_value
+                       < moving_ranges.center_line - moving_ranges.sigma
+             THEN 1 ELSE 0 END AS below_1_sigma
     FROM moving_ranges
-    JOIN baseline USING (booth_id, measurement_point_id, specification_id)
 ), rule_windows AS (
     SELECT
         zoned.*,
@@ -133,6 +197,8 @@ WITH source AS (
                 booth_id,
                 measurement_point_id,
                 specification_id,
+                baseline_id,
+                baseline_segment,
                 shift_id,
                 shift_instance_start
             ORDER BY measurement_timestamp, measurement_id
@@ -142,6 +208,8 @@ WITH source AS (
                 booth_id,
                 measurement_point_id,
                 specification_id,
+                baseline_id,
+                baseline_segment,
                 shift_id,
                 shift_instance_start
             ORDER BY measurement_timestamp, measurement_id
@@ -152,6 +220,8 @@ WITH source AS (
                 booth_id,
                 measurement_point_id,
                 specification_id,
+                baseline_id,
+                baseline_segment,
                 shift_id,
                 shift_instance_start
             ORDER BY measurement_timestamp, measurement_id
@@ -166,6 +236,8 @@ WITH source AS (
                     booth_id,
                     measurement_point_id,
                     specification_id,
+                    baseline_id,
+                    baseline_segment,
                     shift_id,
                     shift_instance_start
                 ORDER BY measurement_timestamp, measurement_id
@@ -179,6 +251,8 @@ WITH source AS (
                 booth_id,
                 measurement_point_id,
                 specification_id,
+                baseline_id,
+                baseline_segment,
                 shift_id,
                 shift_instance_start,
                 center_line_run_id
@@ -189,15 +263,31 @@ WITH source AS (
 ), signals AS (
     SELECT
         rule_run_lengths.*,
-        (measured_value > ucl OR measured_value < lcl) AS rule_1,
-        (observation_number >= 3 AND (above_2_in_3 >= 2 OR below_2_in_3 >= 2)) AS rule_2,
-        (observation_number >= 5 AND (above_1_in_5 >= 4 OR below_1_in_5 >= 4)) AS rule_3,
-        (center_line_side <> 0 AND center_line_run_length >= 8) AS rule_4
+        (
+            baseline_id IS NOT NULL
+            AND (measured_value > i_ucl OR measured_value < i_lcl)
+        ) AS rule_1,
+        (
+            baseline_id IS NOT NULL
+            AND observation_number >= 3
+            AND (above_2_in_3 >= 2 OR below_2_in_3 >= 2)
+        ) AS rule_2,
+        (
+            baseline_id IS NOT NULL
+            AND observation_number >= 5
+            AND (above_1_in_5 >= 4 OR below_1_in_5 >= 4)
+        ) AS rule_3,
+        (
+            baseline_id IS NOT NULL
+            AND center_line_side <> 0
+            AND center_line_run_length >= 8
+        ) AS rule_4
     FROM rule_run_lengths
 )
 SELECT
     measurement_timestamp,
     measurement_id,
+    baseline_id,
     booth_name AS booth,
     point_code AS measurement_point,
     shift_id,
@@ -207,14 +297,40 @@ SELECT
     moving_range,
     center_line,
     sigma,
-    lcl,
-    ucl,
+    i_lcl,
+    i_ucl,
+    mr_center,
+    mr_ucl,
     rule_1,
     rule_2,
     rule_3,
     rule_4,
     (rule_1 OR rule_2 OR rule_3 OR rule_4) AS spc_signal
 FROM signals;
+
+CREATE OR REPLACE VIEW v_spc_rule_results_booth01_a_l1 AS
+SELECT
+    measurement_timestamp,
+    measurement_id,
+    booth,
+    measurement_point,
+    shift_id,
+    shift_name,
+    shift_instance,
+    measured_value,
+    moving_range,
+    center_line,
+    sigma,
+    i_lcl::numeric AS lcl,
+    i_ucl::numeric AS ucl,
+    rule_1,
+    rule_2,
+    rule_3,
+    rule_4,
+    spc_signal
+FROM v_spc_rule_results
+WHERE booth = 'BOOTH_01'
+  AND measurement_point = 'A-L1';
 
 CREATE OR REPLACE VIEW v_capability_measurements_booth01_a_l1 AS
 SELECT

@@ -30,11 +30,34 @@ def load_spc_results():
             measurement.specification_id,
             specification.characteristic,
             specification.unit AS specification_unit,
+            measurement.batch_id,
+            robots.robot_names,
             CAST(spc.baseline_id AS TEXT) AS baseline_id,
             baseline.version AS baseline_version,
             baseline.status AS baseline_current_status,
+            baseline.window_start AS baseline_window_start,
+            baseline.window_end AS baseline_window_end,
             baseline.effective_from AS baseline_effective_from,
             baseline.effective_to AS baseline_effective_to,
+            baseline.approved_by AS baseline_approved_by,
+            baseline.approved_at AS baseline_approved_at,
+            CASE WHEN active.baseline_id IS NOT NULL THEN json_build_object(
+                'id', active.baseline_id,
+                'version', active.version,
+                'status', active.status,
+                'approved_by', active.approved_by,
+                'approved_at', active.approved_at,
+                'window_start', active.window_start,
+                'window_end', active.window_end,
+                'effective_from', active.effective_from,
+                'effective_to', active.effective_to,
+                'center_line', active.center_line,
+                'sigma', active.sigma,
+                'i_lcl', active.i_lcl,
+                'i_ucl', active.i_ucl,
+                'mr_center', active.mr_center,
+                'mr_ucl', active.mr_ucl
+            ) END AS active_baseline,
             spc.booth,
             spc.measurement_point,
             spc.shift_id,
@@ -60,6 +83,17 @@ def load_spc_results():
             ON specification.specification_id = measurement.specification_id
         LEFT JOIN spc_baseline AS baseline
             ON baseline.baseline_id = spc.baseline_id
+        LEFT JOIN spc_baseline AS active
+            ON active.booth_id = measurement.booth_id
+           AND active.measurement_point_id = measurement.measurement_point_id
+           AND active.specification_id = measurement.specification_id
+           AND active.status = 'ACTIVE'
+        LEFT JOIN LATERAL (
+            SELECT array_agg(robot.robot_name ORDER BY robot.robot_name) AS robot_names
+            FROM bridge_measurement_robot AS bridge
+            JOIN dim_robot AS robot ON robot.robot_id = bridge.robot_id
+            WHERE bridge.measurement_id = spc.measurement_id
+        ) AS robots ON TRUE
         WHERE spc.booth = 'BOOTH_01'
           AND spc.measurement_point = 'A-L1'
         ORDER BY spc.measurement_timestamp, spc.measurement_id
@@ -164,6 +198,75 @@ if dashboard_section == "SPC monitoring":
     spc_df = spc_df.sort_values(
         ["measurement_timestamp", "measurement_id"], kind="mergesort"
     ).reset_index(drop=True)
+    if spc_df[["batch_id", "shift_name"]].isna().any().any():
+        st.error("Some SPC results have missing batch or shift information; analysis cannot continue.")
+        st.stop()
+    spc_df["source_position"] = np.arange(len(spc_df))
+    spc_df["robot_names"] = spc_df["robot_names"].apply(
+        lambda value: list(value) if isinstance(value, (list, tuple, np.ndarray)) else []
+    )
+
+    st.sidebar.header("SPC filters")
+    min_spc_date = spc_df["measurement_timestamp"].min().date()
+    max_spc_date = spc_df["measurement_timestamp"].max().date()
+    date_key = f"spc_dates_{selected_specification}"
+    saved_dates = st.session_state.get(date_key)
+    if saved_dates and any(date < min_spc_date or date > max_spc_date for date in saved_dates):
+        del st.session_state[date_key]
+    spc_dates = st.sidebar.date_input(
+        "Measurement date range",
+        value=(min_spc_date, max_spc_date),
+        min_value=min_spc_date,
+        max_value=max_spc_date,
+        key=date_key,
+    )
+    if len(spc_dates) != 2:
+        st.info("Select a start and end date to view SPC results.")
+        st.stop()
+
+    def filter_options(label, values, key, help_text="Leave empty to include all."):
+        selection = st.session_state.get(key, [])
+        unavailable = [value for value in selection if value not in values]
+        if unavailable:
+            st.sidebar.warning(
+                f"Previously selected {label.lower()} values are unavailable: "
+                f"{', '.join(map(str, unavailable))}. Remove them from the filter "
+                "to change the selection; clear the filter to include all."
+            )
+        return st.sidebar.multiselect(
+            label, options=values + unavailable, key=key, help=help_text
+        )
+
+    batches = sorted(spc_df["batch_id"].dropna().unique().tolist())
+    shifts = sorted(spc_df["shift_name"].dropna().unique().tolist())
+    robots = sorted({robot for names in spc_df["robot_names"] for robot in names})
+    selected_batches = filter_options("Batch", batches, f"spc_batches_{selected_specification}")
+    selected_shifts = filter_options("Shift", shifts, f"spc_shifts_{selected_specification}")
+    selected_robots = filter_options(
+        "Robot (any linked)", robots, f"spc_robots_{selected_specification}",
+        help_text="Matches measurements linked to any selected robot; empty includes all measurements.",
+    )
+    spc_dates_only = spc_df["measurement_timestamp"].dt.date
+    filter_mask = (
+        spc_dates_only.between(*spc_dates)
+    )
+    if selected_batches:
+        filter_mask &= spc_df["batch_id"].isin(selected_batches)
+    if selected_shifts:
+        filter_mask &= spc_df["shift_name"].isin(selected_shifts)
+    if selected_robots:
+        filter_mask &= spc_df["robot_names"].apply(
+            lambda names: any(robot in names for robot in selected_robots)
+        )
+    spc_df = spc_df.loc[filter_mask].copy().reset_index(drop=True)
+    if spc_df.empty:
+        st.warning("No SPC measurements match the selected filters.")
+        st.stop()
+    st.caption(
+        "Filters select measurement endpoints. Rules and moving ranges retain their "
+        "original within-shift context, which may include measurements outside the selection. "
+        "Robot associations are not evidence of causation."
+    )
 
     rule_columns = ["rule_1", "rule_2", "rule_3", "rule_4"]
     rule_labels = {
@@ -189,6 +292,22 @@ if dashboard_section == "SPC monitoring":
     spc_df["mr_lcl"] = np.where(baseline_covered, 0.0, np.nan)
     baseline_covered_count = int(baseline_covered.sum())
     baseline_coverage_pct = baseline_covered_count / len(spc_df) * 100
+    covered_signal_count = int((baseline_covered & spc_df["spc_signal"]).sum())
+    covered_signal_rate = (
+        covered_signal_count / baseline_covered_count * 100 if baseline_covered_count else None
+    )
+
+    st.subheader("SPC overview")
+    overview = st.columns(5)
+    overview[0].metric("Total measurements", f"{len(spc_df):,}")
+    overview[1].metric("Baseline-covered observations", f"{baseline_covered_count:,} / {len(spc_df):,} total")
+    overview[2].metric("Not assessed (no applicable baseline)", f"{len(spc_df) - baseline_covered_count:,}")
+    overview[3].metric("Observations with signal", f"{covered_signal_count:,}" if baseline_covered_count else "N/A")
+    overview[4].metric(
+        "Baseline-covered signal rate",
+        f"{covered_signal_rate:.2f}%" if covered_signal_rate is not None else "N/A",
+        help="Observations with at least one I-chart rule signal divided by covered observations; MR violations are separate.",
+    )
 
     if baseline_covered_count == 0:
         st.info(
@@ -234,13 +353,18 @@ if dashboard_section == "SPC monitoring":
     )
     transitions = ~same_baseline
     transitions.iloc[0] = False
+    filtered_gaps = spc_df["source_position"].diff().gt(1)
     limit_columns = ["center_line", "i_ucl", "i_lcl", "mr_center", "mr_ucl", "mr_lcl"]
     plot_columns = ["measurement_timestamp", *limit_columns, "i_hover", "mr_hover"]
-    limit_gaps = spc_df.loc[transitions, plot_columns].copy()
+    limit_gaps = spc_df.loc[transitions | filtered_gaps, plot_columns].copy()
     limit_gaps[limit_columns] = np.nan
     limit_plot = pd.concat(
         [limit_gaps, spc_df[plot_columns]]
     ).sort_index(kind="stable")
+    raw_columns = ["measurement_timestamp", "measured_value", "moving_range", "i_hover", "mr_hover"]
+    raw_gaps = spc_df.loc[filtered_gaps, raw_columns].copy()
+    raw_gaps[["measured_value", "moving_range"]] = np.nan
+    raw_plot = pd.concat([raw_gaps, spc_df[raw_columns]]).sort_index(kind="stable")
 
     spc_df["triggered_rules"] = spc_df[rule_columns].apply(
         lambda row: " + ".join(
@@ -258,12 +382,13 @@ if dashboard_section == "SPC monitoring":
     i_chart = go.Figure()
     i_chart.add_trace(
         go.Scatter(
-            x=spc_df["measurement_timestamp"],
-            y=spc_df["measured_value"],
+            x=raw_plot["measurement_timestamp"],
+            y=raw_plot["measured_value"],
             mode="lines+markers",
             name="Measured value",
             line={"color": "#2b6cb0", "width": 1.5},
-            text=spc_df["i_hover"],
+            connectgaps=False,
+            text=raw_plot["i_hover"],
             hovertemplate="%{x}<br>Measured value: %{y}<br>%{text}<extra></extra>",
         )
     )
@@ -367,13 +492,13 @@ if dashboard_section == "SPC monitoring":
     mr_chart = go.Figure()
     mr_chart.add_trace(
         go.Scatter(
-            x=spc_df["measurement_timestamp"],
-            y=spc_df["moving_range"],
+            x=raw_plot["measurement_timestamp"],
+            y=raw_plot["moving_range"],
             mode="lines+markers",
             name="Moving range",
             line={"color": "#2b6cb0", "width": 1.5},
             connectgaps=False,
-            text=spc_df["mr_hover"],
+            text=raw_plot["mr_hover"],
             hovertemplate="%{x}<br>Moving range: %{y}<br>%{text}<extra></extra>",
         )
     )
@@ -458,19 +583,11 @@ if dashboard_section == "SPC monitoring":
         "Maximum moving range",
         f"{maximum_mr:.3f}" if maximum_mr is not None else "N/A",
     )
-    coverage_column, total_column = st.columns(2)
-    coverage_column.metric(
+    st.metric(
         "Baseline coverage",
         f"{baseline_coverage_pct:.2f}%",
         help="Baseline-covered observations divided by all filtered observations.",
     )
-    total_column.metric(
-        "Baseline-covered observations",
-        f"{baseline_covered_count:,} / {len(spc_df):,} total",
-    )
-    counts = st.columns(2)
-    counts[0].metric("Total measurements", f"{len(spc_df):,}")
-    counts[1].metric("Not assessed (no applicable baseline)", f"{len(spc_df) - baseline_covered_count:,}")
     if baseline_covered_count < len(spc_df):
         st.warning(
             "Measurements without an applicable baseline are not assessed; "
@@ -486,20 +603,73 @@ if dashboard_section == "SPC monitoring":
     provenance_columns = [
         "baseline_id", "baseline_version", "baseline_current_status",
         "baseline_effective_from", "baseline_effective_to",
+        "baseline_approved_by", "baseline_approved_at",
+        "baseline_window_start", "baseline_window_end",
+        "center_line", "sigma", "i_lcl", "i_ucl", "mr_center", "mr_ucl",
     ]
     provenance = spc_df.loc[baseline_covered, provenance_columns].drop_duplicates()
+    active_baseline = spc_df["active_baseline"].iloc[0]
+    if active_baseline is not None:
+        active_id = str(active_baseline["id"])
+        if active_id not in provenance["baseline_id"].astype(str).tolist():
+            active_summary = pd.DataFrame([active_baseline])
+            for column in ("approved_at", "window_start", "window_end", "effective_from", "effective_to"):
+                active_summary[column] = pd.to_datetime(
+                    active_summary[column], utc=True
+                ).dt.tz_convert("Europe/Budapest")
+            st.caption(
+                "The current active baseline below is not assigned to the selected measurements. "
+                "It does not assess measurements outside its effective period."
+            )
+            st.dataframe(
+                active_summary.rename(columns={
+                    "id": "Baseline ID", "version": "Version", "status": "Current status",
+                    "approved_by": "Approved by", "approved_at": "Approved at (Europe/Budapest)",
+                    "window_start": "Fitting start (inclusive, Europe/Budapest)",
+                    "window_end": "Fitting end (exclusive, Europe/Budapest)",
+                    "effective_from": "Effective from (inclusive, Europe/Budapest)",
+                    "effective_to": "Effective to (exclusive, Europe/Budapest; blank means open)",
+                    "center_line": "I center line", "sigma": "Sigma",
+                    "i_lcl": "I LCL", "i_ucl": "I UCL",
+                    "mr_center": "MR center line", "mr_ucl": "MR UCL",
+                }),
+                width="stretch",
+                hide_index=True,
+            )
     if provenance.empty:
         st.info("No applicable baseline was assigned to these measurements.")
     else:
-        if provenance[["baseline_version", "baseline_current_status", "baseline_effective_from"]].isna().any().any():
+        if provenance[
+            [
+                "baseline_version", "baseline_current_status", "baseline_effective_from",
+                "baseline_approved_by", "baseline_approved_at",
+            ]
+        ].isna().any().any():
             st.warning("Some assigned baseline metadata is unavailable.")
+        for column in (
+            "baseline_effective_from", "baseline_effective_to", "baseline_approved_at",
+            "baseline_window_start", "baseline_window_end",
+        ):
+            provenance[column] = pd.to_datetime(provenance[column], utc=True).dt.tz_convert(
+                "Europe/Budapest"
+            )
         st.table(
             provenance.rename(columns={
                 "baseline_id": "Baseline ID",
                 "baseline_version": "Version",
                 "baseline_current_status": "Current status",
-                "baseline_effective_from": "Effective from (inclusive)",
-                "baseline_effective_to": "Effective to (exclusive; blank means open)",
+                "baseline_effective_from": "Effective from (inclusive, Europe/Budapest)",
+                "baseline_effective_to": "Effective to (exclusive, Europe/Budapest; blank means open)",
+                "baseline_approved_by": "Approved by",
+                "baseline_approved_at": "Approved at (Europe/Budapest)",
+                "baseline_window_start": "Fitting start (inclusive, Europe/Budapest)",
+                "baseline_window_end": "Fitting end (exclusive, Europe/Budapest)",
+                "center_line": "I center line",
+                "sigma": "Sigma",
+                "i_lcl": "I LCL",
+                "i_ucl": "I UCL",
+                "mr_center": "MR center line",
+                "mr_ucl": "MR UCL",
             }).reset_index(drop=True),
             alt="Baselines assigned to the selected specification",
         )
@@ -510,24 +680,14 @@ if dashboard_section == "SPC monitoring":
         rule_labels[column]: int(spc_df.loc[baseline_covered, column].sum())
         for column in rule_columns
     }
-    covered_signal_count = len(signal_rows)
-    covered_signal_rate = (
-        covered_signal_count / baseline_covered_count * 100 if baseline_covered_count else None
-    )
-    summary_columns = st.columns(5)
+    summary_columns = st.columns(4)
     for column, (label, count) in zip(
         summary_columns,
         [
             *rule_counts.items(),
-            ("Observations with signal", covered_signal_count),
         ],
     ):
         column.metric(label, f"{count:,}" if baseline_covered_count else "N/A")
-    st.metric(
-        "Baseline-covered signal rate",
-        f"{covered_signal_rate:.2f}%" if covered_signal_rate is not None else "N/A",
-        help="Measurements with an SPC signal divided by baseline-covered measurements.",
-    )
     st.caption("Signal rate denominator: baseline-covered measurements only.")
     st.metric(
         "Assessed with no SPC signal",
@@ -551,6 +711,16 @@ if dashboard_section == "SPC monitoring":
                 "measured_value",
                 "triggered_rules",
                 "spc_signal",
+                "batch_id",
+                "shift_name",
+                "robot_names",
+                "baseline_id",
+                "moving_range",
+                "shift_instance",
+                "center_line",
+                "i_lcl",
+                "i_ucl",
+                "mr_ucl",
             ]
         ].rename(
             columns={
@@ -559,10 +729,38 @@ if dashboard_section == "SPC monitoring":
                 "measured_value": "Measured value",
                 "triggered_rules": "Triggered SPC rules",
                 "spc_signal": "SPC signal status",
+                "batch_id": "Batch ID",
+                "shift_name": "Shift",
+                "robot_names": "Linked robots",
+                "baseline_id": "Baseline ID",
+                "moving_range": "Moving range",
+                "shift_instance": "Shift instance",
+                "center_line": "I center line",
+                "i_lcl": "I LCL",
+                "i_ucl": "I UCL",
+                "mr_ucl": "MR UCL",
             }
         )
         st.dataframe(
             signal_details,
+            width="stretch",
+            hide_index=True,
+        )
+    if not violation_rows.empty:
+        st.subheader("MR violation details")
+        st.dataframe(
+            violation_rows[
+                [
+                    "measurement_timestamp", "measurement_id", "measured_value",
+                    "moving_range", "mr_ucl", "batch_id", "shift_name",
+                    "robot_names", "baseline_id",
+                ]
+            ].rename(columns={
+                "measurement_timestamp": "Timestamp", "measurement_id": "Measurement ID",
+                "measured_value": "Measured value", "moving_range": "Moving range",
+                "mr_ucl": "MR UCL", "batch_id": "Batch ID", "shift_name": "Shift",
+                "robot_names": "Linked robots", "baseline_id": "Baseline ID",
+            }),
             width="stretch",
             hide_index=True,
         )

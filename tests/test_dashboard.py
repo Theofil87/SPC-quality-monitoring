@@ -25,11 +25,18 @@ def _row(measurement_id, baseline_id=1, **overrides):
         "specification_id": 1,
         "characteristic": "Thickness",
         "specification_unit": "um",
+        "batch_id": 1,
+        "robot_names": ["ROBOT_01"],
         "baseline_id": baseline_id,
         "baseline_version": baseline_id,
         "baseline_current_status": "ACTIVE" if baseline_id is not None else None,
+        "baseline_window_start": pd.Timestamp("2026-02-01", tz="UTC") if baseline_id is not None else None,
+        "baseline_window_end": pd.Timestamp("2026-03-01", tz="UTC") if baseline_id is not None else None,
         "baseline_effective_from": pd.Timestamp("2026-03-01", tz="UTC") if baseline_id is not None else None,
         "baseline_effective_to": None,
+        "baseline_approved_by": "Reviewer" if baseline_id is not None else None,
+        "baseline_approved_at": pd.Timestamp("2026-03-01", tz="UTC") if baseline_id is not None else None,
+        "active_baseline": None,
         "booth": "BOOTH_01",
         "measurement_point": "A-L1",
         "shift_id": 1,
@@ -140,6 +147,15 @@ def test_spc_query_joins_specification_by_measurement_id(monkeypatch):
         assert "baseline.status as baseline_current_status" in queries[0]
         assert "baseline.effective_from as baseline_effective_from" in queries[0]
         assert "baseline.effective_to as baseline_effective_to" in queries[0]
+        assert "baseline.approved_by as baseline_approved_by" in queries[0]
+        assert "baseline.approved_at as baseline_approved_at" in queries[0]
+        assert "measurement.batch_id" in queries[0]
+        assert "bridge_measurement_robot" in queries[0]
+        assert "array_agg(robot.robot_name" in queries[0]
+        assert "baseline.window_start as baseline_window_start" in queries[0]
+        assert "baseline.window_end as baseline_window_end" in queries[0]
+        assert "left join spc_baseline as active" in queries[0]
+        assert "active.status = 'active'" in queries[0]
     finally:
         st.cache_data.clear()
         st.cache_resource.clear()
@@ -458,8 +474,10 @@ def test_provenance_and_hover_preserve_historical_baseline_segments(run_dashboar
     assert provenance["Baseline ID"].tolist() == [1, 2]
     assert provenance["Version"].tolist() == [1, 2]
     assert provenance["Current status"].tolist() == ["RETIRED", "ACTIVE"]
-    assert pd.notna(provenance["Effective to (exclusive; blank means open)"].iloc[0])
-    assert pd.isna(provenance["Effective to (exclusive; blank means open)"].iloc[1])
+    assert pd.notna(provenance["Effective to (exclusive, Europe/Budapest; blank means open)"].iloc[0])
+    assert pd.isna(provenance["Effective to (exclusive, Europe/Budapest; blank means open)"].iloc[1])
+    assert provenance["Approved by"].tolist() == ["Reviewer", "Reviewer"]
+    assert str(provenance["Approved at (Europe/Budapest)"].iloc[0]) == "2026-03-01 01:00:00+01:00"
     assert any("not at measurement time" in caption.value for caption in app.caption)
     for chart, limit, center in (
         (_charts(app)[0], "UCL", "I UCL"),
@@ -492,6 +510,223 @@ def test_missing_assigned_baseline_metadata_is_explicit(run_dashboard):
     app = run_dashboard([_row(1, 1, baseline_version=None, baseline_current_status=None)])
     assert any("baseline metadata is unavailable" in warning.value for warning in app.warning)
     assert "version Unavailable" in _trace(_charts(app)[0], "Measured value").text[0]
+
+
+def test_january_baseline_values_and_approval_are_shown_without_refitting(run_dashboard):
+    january_limits = {
+        "center_line": 74.540491,
+        "sigma": 1.197419,
+        "i_lcl": 70.948233,
+        "i_ucl": 78.132749,
+        "mr_center": 1.350689,
+        "mr_ucl": 4.412701,
+        "baseline_approved_by": "Bela Pager",
+        "baseline_approved_at": pd.Timestamp("2026-11-07 19:56:53", tz="UTC"),
+        "baseline_effective_from": pd.Timestamp("2026-01-19 05:00:00", tz="UTC"),
+    }
+    app = run_dashboard([
+        _row(1, None, measurement_timestamp=pd.Timestamp("2026-01-19 05:59")),
+        _row(
+            2, 1, measurement_timestamp=pd.Timestamp("2026-01-19 06:00"),
+            measured_value=80.0, rule_1=True, rule_3=True, spc_signal=True,
+            **january_limits,
+        ),
+        _row(
+            3, 1, measurement_timestamp=pd.Timestamp("2026-01-19 06:01"),
+            measured_value=70.0, moving_range=5.0, **january_limits,
+        ),
+    ])
+    i_chart, mr_chart = _charts(app)
+    for chart, trace_name, value in (
+        (i_chart, "Center line", 74.540491),
+        (i_chart, "LCL", 70.948233),
+        (i_chart, "UCL", 78.132749),
+        (mr_chart, "MR center line", 1.350689),
+        (mr_chart, "MR UCL", 4.412701),
+    ):
+        values = _values(_trace(chart, trace_name).y)
+        assert pd.isna(values[0])
+        assert values[-2:] == [value, value]
+    assert _metrics(app)["Baseline-covered observations"] == "2 / 3 total"
+    assert _metrics(app)["Rule 1"] == "1"
+    assert _metrics(app)["Rule 3"] == "1"
+    assert _metrics(app)["MR violations"] == "1"
+    provenance = app.table[0].value
+    assert provenance["Approved by"].tolist() == ["Bela Pager"]
+    assert str(provenance["Approved at (Europe/Budapest)"].iloc[0]) == "2026-11-07 20:56:53+01:00"
+    assert str(provenance["Effective from (inclusive, Europe/Budapest)"].iloc[0]) == "2026-01-19 06:00:00+01:00"
+    assert provenance["I center line"].tolist() == [74.540491]
+    assert provenance["MR UCL"].tolist() == [4.412701]
+    assert "Fitting start (inclusive, Europe/Budapest)" in provenance.columns
+
+
+def test_spc_filters_keep_rule_context_and_break_chart_lines(run_dashboard):
+    rows = [
+        _row(1, 1, batch_id=10, robot_names=["R1", "R2"], measured_value=10.0),
+        _row(2, None, batch_id=20, robot_names=["R2"], measured_value=20.0),
+        _row(3, 1, batch_id=10, robot_names=["R1"], measured_value=30.0,
+             moving_range=4.0, rule_3=True, spc_signal=True),
+        _row(4, 1, batch_id=10, robot_names=["R1"], shift_name="SHIFT_02",
+             measured_value=40.0, moving_range=5.0),
+    ]
+    app = run_dashboard(rows)
+    app.multiselect(key="spc_batches_1").set_value([10]).run()
+    assert not app.exception
+    assert _metrics(app)["Total measurements"] == "3"
+    assert _metrics(app)["Rule 3"] == "1"
+    assert _metrics(app)["MR violations"] == "2"
+    i_chart, mr_chart = _charts(app)
+    for chart, name in ((i_chart, "Measured value"), (i_chart, "UCL"),
+                        (mr_chart, "Moving range"), (mr_chart, "MR UCL")):
+        assert pd.isna(_values(_trace(chart, name).y)[1])
+        assert _trace(chart, name).connectgaps is False
+    assert any("original within-shift context" in caption.value for caption in app.caption)
+    assert app.dataframe[0].value["Measurement ID"].tolist() == [3]
+    assert app.dataframe[1].value["Measurement ID"].tolist() == [3, 4]
+
+    app.multiselect(key="spc_shifts_1").set_value(["SHIFT_01"]).run()
+    app.multiselect(key="spc_robots_1").set_value(["R2"]).run()
+    assert not app.exception
+    assert _metrics(app)["Total measurements"] == "1"
+    assert _values(_trace(_charts(app)[0], "Measured value").y) == [10.0]
+    assert _metrics(app)["MR violations"] == "N/A"
+
+
+def test_date_filter_and_empty_selection(run_dashboard):
+    app = run_dashboard([
+        _row(1, measurement_timestamp=pd.Timestamp("2026-03-01 06:00"),
+             robot_names=["R2"]),
+        _row(2, measurement_timestamp=pd.Timestamp("2026-03-02 06:00"),
+             robot_names=["R1"], rule_4=True, spc_signal=True),
+    ])
+    app.date_input(key="spc_dates_1").set_value(
+        (pd.Timestamp("2026-03-02").date(), pd.Timestamp("2026-03-02").date())
+    ).run()
+    assert not app.exception
+    assert _metrics(app)["Total measurements"] == "1"
+    assert _metrics(app)["Rule 4"] == "1"
+    app.multiselect(key="spc_robots_1").set_value(["R2"]).run()
+    assert any("No SPC measurements match" in item.value for item in app.warning)
+    assert not app.metric
+    assert not app.get("plotly_chart")
+
+
+def test_spc_filters_are_scoped_to_specification(run_dashboard):
+    app = run_dashboard([
+        _row(1, batch_id=10),
+        _row(2, batch_id=20, specification_id=2, characteristic="Weight"),
+    ])
+    app.selectbox[0].select(1).run()
+    app.multiselect(key="spc_batches_1").set_value([10]).run()
+    app.selectbox[0].select(2).run()
+    assert not app.exception
+    assert _metrics(app)["Total measurements"] == "1"
+    assert app.multiselect(key="spc_batches_2").value == []
+
+
+@pytest.mark.parametrize(
+    ("key", "field", "selected", "other"),
+    [
+        ("spc_batches_1", "batch_id", 10, 20),
+        ("spc_shifts_1", "shift_name", "SHIFT_01", "SHIFT_02"),
+        ("spc_robots_1", "robot_names", "R1", "R2"),
+    ],
+)
+def test_unavailable_filter_requires_explicit_clear(run_dashboard, key, field, selected, other):
+    values = lambda value: [value] if field == "robot_names" else value
+    rows = [_row(1, **{field: values(selected)}), _row(2, **{field: values(other)})]
+    app = run_dashboard(rows)
+    app.multiselect(key=key).set_value([selected]).run()
+    assert _metrics(app)["Total measurements"] == "1"
+
+    _refresh_dashboard(app, rows, [rows[1]])
+    assert not app.exception
+    assert app.multiselect(key=key).value == [selected]
+    assert any("unavailable" in item.value for item in app.warning)
+    assert not app.metric
+    assert not app.get("plotly_chart")
+    app.run()
+    assert app.multiselect(key=key).value == [selected]
+    assert not app.metric
+
+    app.multiselect(key=key).set_value([]).run()
+    assert not app.exception
+    assert _metrics(app)["Total measurements"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("key", "field", "missing", "remaining"),
+    [
+        ("spc_batches_1", "batch_id", 10, 20),
+        ("spc_shifts_1", "shift_name", "SHIFT_01", "SHIFT_02"),
+        ("spc_robots_1", "robot_names", "R1", "R2"),
+    ],
+)
+def test_partially_unavailable_filter_preserves_selection(run_dashboard, key, field, missing, remaining):
+    values = lambda value: [value] if field == "robot_names" else value
+    rows = [_row(1, **{field: values(missing)}), _row(2, **{field: values(remaining)})]
+    app = run_dashboard(rows)
+    app.multiselect(key=key).set_value([missing, remaining]).run()
+    _refresh_dashboard(app, rows, [rows[1]])
+    assert not app.exception
+    assert set(app.multiselect(key=key).value) == {missing, remaining}
+    assert any("unavailable" in item.value for item in app.warning)
+    assert _metrics(app)["Total measurements"] == "1"
+    assert _values(_trace(_charts(app)[0], "Measured value").y) == [75.0]
+    app.multiselect(key=key).set_value([remaining]).run()
+    assert not any("unavailable" in item.value for item in app.warning)
+    assert _metrics(app)["Total measurements"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("key", "field", "selected", "other"),
+    [
+        ("spc_batches_1", "batch_id", 10, 20),
+        ("spc_shifts_1", "shift_name", "SHIFT_01", "SHIFT_02"),
+        ("spc_robots_1", "robot_names", "R1", "R2"),
+    ],
+)
+def test_unavailable_filter_selection_recovers_when_value_returns(run_dashboard, key, field, selected, other):
+    values = lambda value: [value] if field == "robot_names" else value
+    selected_row = _row(1, **{field: values(selected)})
+    other_row = _row(2, **{field: values(other)})
+    rows = [selected_row, other_row]
+    app = run_dashboard(rows)
+    app.multiselect(key=key).set_value([selected]).run()
+    _refresh_dashboard(app, rows, [other_row])
+    assert not app.metric
+    _refresh_dashboard(app, rows, [selected_row, other_row])
+    assert not app.exception
+    assert app.multiselect(key=key).value == [selected]
+    assert not any("unavailable" in item.value for item in app.warning)
+    assert _metrics(app)["Total measurements"] == "1"
+
+
+def test_missing_batch_or_shift_information_stops_analysis(run_dashboard):
+    app = run_dashboard([_row(1, batch_id=None)])
+    assert any("missing batch or shift" in item.value for item in app.error)
+    assert not app.metric
+
+
+def test_active_baseline_is_visible_when_selected_measurements_are_uncovered(run_dashboard):
+    active = {
+        "id": 1, "version": 1, "status": "ACTIVE",
+        "approved_by": "Reviewer", "approved_at": "2026-03-01T00:00:00+00:00",
+        "window_start": "2026-01-01T05:00:00+00:00",
+        "window_end": "2026-01-19T05:00:00+00:00",
+        "effective_from": "2026-01-19T05:00:00+00:00", "effective_to": None,
+        "center_line": 74.540491, "sigma": 1.197419, "i_lcl": 70.948233,
+        "i_ucl": 78.132749, "mr_center": 1.350689, "mr_ucl": 4.412701,
+    }
+    app = run_dashboard([_row(1, None, active_baseline=active)])
+    assert _metrics(app)["Baseline coverage"] == "0.00%"
+    assert _metrics(app)["Rule 1"] == "N/A"
+    assert any("not assigned to the selected measurements" in item.value for item in app.caption)
+    summary = app.dataframe[0].value
+    assert summary["Baseline ID"].tolist() == [1]
+    assert summary["I UCL"].tolist() == [78.132749]
+    assert summary["Approved by"].tolist() == ["Reviewer"]
+    assert str(summary["Effective from (inclusive, Europe/Budapest)"].iloc[0]) == "2026-01-19 06:00:00+01:00"
 
 
 @pytest.mark.parametrize(

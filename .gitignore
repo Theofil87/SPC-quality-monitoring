@@ -21,3 +21,22 @@ target/
 dbt_packages/
 logs/
 profiles.yml
+
+# Local database backups
+*.dump
+*.sql.gz
+*.backup
+*.bak
+backups/
+
+# Local secrets and private configuration
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+.pgpass
+pgpass.conf
+credentials.json
+credentials.local.*
+*.pem
+*.key

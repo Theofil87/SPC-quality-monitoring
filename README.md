@@ -24,7 +24,17 @@ For the analysed stream the answer is: **stability is not demonstrated** (SPC si
 - Drift and shift-to-shift variation analysis on actual shift instances
 - 44 Python tests plus SQL regression fixtures
 
-Not implemented: a dashboard or Streamlit app, and root-cause analysis. The `fact_process_event` ground truth is not used by the analysis notebooks or dbt models.
+The Streamlit dashboard provides quality reporting and baseline-based SPC monitoring. Root-cause analysis is not implemented. The `fact_process_event` ground truth is not used by the analysis notebooks or dbt models.
+
+### SPC dashboard
+
+Run `python -m streamlit run dashboard.py` and select **SPC monitoring**. The SPC view is limited to BOOTH_01 / A-L1 and requires an explicit specification choice when multiple specifications are available.
+
+Date, batch, shift and linked-robot filters select measurement endpoints. An empty batch, shift or robot selection includes all; a robot selection matches any linked robot. Rule flags and moving ranges retain their original within-shift context, which may include measurements outside the selection. Chart lines break where filtering removes observations.
+
+If a selected batch, shift or robot disappears after a refresh, it remains selected and a warning identifies it. Remove the unavailable selection or explicitly clear the filter to include all values.
+
+Charts use stored baseline limits, not limits refitted from filtered data. Coverage and signal rates distinguish baseline-covered observations from measurements that are not assessed; MR violations use valid covered moving ranges as their denominator. Baseline provenance includes approval, fitting and effective periods. Results can be cached for up to one hour.
 
 ## 🏭 Manufacturing Context
 

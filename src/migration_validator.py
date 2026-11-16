@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
@@ -39,7 +39,7 @@ class RecordDifference:
 class ComparisonReport:
     source_count: int
     target_count: int
-    matched: tuple[Record, ...]
+    matched_count: int
     source_only: tuple[Record, ...]
     target_only: tuple[Record, ...]
     different: tuple[RecordDifference, ...]
@@ -97,20 +97,16 @@ def _primary_key_columns(primary_key: str | Sequence[str]) -> tuple[str, ...]:
     return columns
 
 
-def _index_records(
+def _iter_records(
     rows: Iterable[Mapping[str, object]],
     key_columns: tuple[str, ...],
     side: str,
-    columns: frozenset[str] | None,
-    key_types: tuple[str, ...] | None,
-) -> tuple[
-    dict[_NormalizedKey, tuple[Record, dict[str, _NormalizedValue]]],
-    frozenset[str] | None,
-    tuple[str, ...] | None,
-]:
+) -> Iterator[tuple[_NormalizedKey, Record, frozenset[str], tuple[str, ...]]]:
     if isinstance(rows, (str, bytes, Mapping)):
         raise TypeError(f"{side} must be an iterable of record mappings")
-    indexed: dict[_NormalizedKey, tuple[Record, dict[str, _NormalizedValue]]] = {}
+    columns = None
+    key_types = None
+    previous_key = None
     for row in rows:
         if not isinstance(row, Mapping):
             raise TypeError(f"{side} records must be mappings")
@@ -132,15 +128,17 @@ def _index_records(
             key_types = current_key_types
         elif current_key_types != key_types:
             raise ValueError(f"{side} primary key types do not match")
-        if key in indexed:
+        if key == previous_key:
             raise ValueError(f"{side} contains a duplicate primary key")
+        if previous_key is not None and key < previous_key:
+            raise ValueError(f"{side} records must be ordered by primary key")
+        previous_key = key
         values = {name: normalized[name][1] for name in sorted(row_columns)}
         record = Record(
-            primary_key=tuple(normalized[column][1] for column in key_columns),
+            primary_key=tuple(value for _, value in key),
             values=MappingProxyType(values),
         )
-        indexed[key] = (record, normalized)
-    return indexed, columns, key_types
+        yield key, record, columns, key_types
 
 
 def compare_records(
@@ -148,43 +146,81 @@ def compare_records(
     target: Iterable[Mapping[str, object]],
     primary_key: str | Sequence[str],
 ) -> ComparisonReport:
-    """Compare all records by primary key; invalid input raises an exception.
+    """Compare records from ascending primary-key streams.
 
     Aware datetimes compare as UTC instants; naive datetimes compare as local
     wall times. Unsupported types and non-finite numeric values are rejected.
+    Invalid input or records not ordered by primary key raise an exception.
     """
     key_columns = _primary_key_columns(primary_key)
-    source_index, columns, key_types = _index_records(
-        source, key_columns, "source", None, None
-    )
-    target_index, columns, _ = _index_records(
-        target, key_columns, "target", columns, key_types
-    )
-    matched: list[Record] = []
+    source_rows = iter(_iter_records(source, key_columns, "source"))
+    target_rows = iter(_iter_records(target, key_columns, "target"))
+    source_row = next(source_rows, None)
+    target_row = next(target_rows, None)
+
+    source_columns = source_row[2] if source_row else None
+    target_columns = target_row[2] if target_row else None
+    if source_columns is not None and target_columns is not None:
+        if source_columns != target_columns:
+            raise ValueError("target record columns do not match")
+    columns = source_columns or target_columns
+
+    source_key_types = source_row[3] if source_row else None
+    target_key_types = target_row[3] if target_row else None
+    if source_key_types is not None and target_key_types is not None:
+        if source_key_types != target_key_types:
+            raise ValueError("target primary key types do not match")
+
+    source_count = int(source_row is not None)
+    target_count = int(target_row is not None)
+    matched_count = 0
     source_only: list[Record] = []
     target_only: list[Record] = []
     different: list[RecordDifference] = []
-    for key in sorted(source_index.keys() | target_index.keys(), key=repr):
-        if key not in target_index:
-            source_only.append(source_index[key][0])
-        elif key not in source_index:
-            target_only.append(target_index[key][0])
+
+    while source_row is not None and target_row is not None:
+        source_key, source_record, _, source_types = source_row
+        target_key, target_record, _, target_types = target_row
+        if source_types != target_types:
+            raise ValueError("source and target primary key types do not match")
+        if source_key < target_key:
+            source_only.append(source_record)
+            source_row = next(source_rows, None)
+            source_count += int(source_row is not None)
+        elif target_key < source_key:
+            target_only.append(target_record)
+            target_row = next(target_rows, None)
+            target_count += int(target_row is not None)
         else:
-            source_record, source_values = source_index[key]
-            target_record, target_values = target_index[key]
             fields = tuple(
                 FieldDifference(name, source_record.values[name], target_record.values[name])
-                for name in sorted(columns or ())
-                if source_values[name] != target_values[name]
+                for name in sorted(columns)
+                if _normalize(source_record.values[name])
+                != _normalize(target_record.values[name])
             )
             if fields:
                 different.append(RecordDifference(source_record.primary_key, fields))
             else:
-                matched.append(source_record)
+                matched_count += 1
+            source_row = next(source_rows, None)
+            target_row = next(target_rows, None)
+            source_count += int(source_row is not None)
+            target_count += int(target_row is not None)
+
+    while source_row is not None:
+        source_only.append(source_row[1])
+        source_row = next(source_rows, None)
+        source_count += int(source_row is not None)
+
+    while target_row is not None:
+        target_only.append(target_row[1])
+        target_row = next(target_rows, None)
+        target_count += int(target_row is not None)
+
     return ComparisonReport(
-        source_count=len(source_index),
-        target_count=len(target_index),
-        matched=tuple(matched),
+        source_count=source_count,
+        target_count=target_count,
+        matched_count=matched_count,
         source_only=tuple(source_only),
         target_only=tuple(target_only),
         different=tuple(different),

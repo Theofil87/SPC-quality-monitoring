@@ -8,18 +8,21 @@ import pytest
 from src.migration_validator import compare_records
 
 
-def test_equal_records_are_order_independent_and_reported():
-    source = [{"id": 2, "value": "b"}, {"id": 1, "value": "a"}]
+def test_equal_sorted_records_are_reported():
+    source = [{"id": 1, "value": "a"}, {"id": 2, "value": "b"}]
     target = [{"value": "a", "id": 1}, {"value": "b", "id": 2}]
 
     report = compare_records(source, target, "id")
 
     assert report.status == "PASS"
     assert (report.source_count, report.target_count) == (2, 2)
-    assert [record.primary_key for record in report.matched] == [(1,), (2,)]
-    assert report.matched[0].values == {"id": 1, "value": "a"}
+    assert report.matched_count == 2
     assert not report.source_only and not report.target_only and not report.different
-    assert report == compare_records(list(reversed(source)), list(reversed(target)), "id")
+
+
+def test_unsorted_records_are_rejected():
+    with pytest.raises(ValueError, match="ordered by primary key"):
+        compare_records([{"id": 2}, {"id": 1}], [{"id": 1}, {"id": 2}], "id")
 
 
 def test_missing_source_and_target_records_are_reported_with_values():
@@ -35,7 +38,7 @@ def test_missing_source_and_target_records_are_reported_with_values():
     assert report.source_only[0].values["value"] == "source"
     assert report.target_only[0].primary_key == (3,)
     assert report.target_only[0].values["value"] == "target"
-    assert report.matched[0].primary_key == (2,)
+    assert report.matched_count == 1
 
 
 def test_different_fields_include_both_values():
@@ -61,7 +64,7 @@ def test_composite_primary_key_distinguishes_records():
     )
 
     assert report.status == "FAIL"
-    assert report.matched[0].primary_key == (1, 3)
+    assert report.matched_count == 1
     assert report.source_only[0].primary_key == (1, 2)
     assert report.target_only[0].primary_key == (1, 4)
 
@@ -112,7 +115,7 @@ def test_aware_datetime_primary_keys_match_across_timezones():
     report = compare_records(iter([{"id": source_key}]), iter([{"id": target_key}]), "id")
 
     assert report.status == "PASS"
-    assert len(report.matched) == 1
+    assert report.matched_count == 1
 
 
 def test_ambiguous_aware_datetimes_with_same_timezone_use_real_instants():
@@ -132,7 +135,8 @@ def test_empty_tables_are_equal():
 
     assert report.status == "PASS"
     assert (report.source_count, report.target_count) == (0, 0)
-    assert not report.matched and not report.source_only and not report.target_only
+    assert report.matched_count == 0
+    assert not report.source_only and not report.target_only
 
 
 @pytest.mark.parametrize(

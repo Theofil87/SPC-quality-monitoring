@@ -1,3 +1,8 @@
+\set ON_ERROR_STOP on
+
+DO $validation$
+BEGIN
+    IF EXISTS (
 -- Each query below must return zero rows to pass (grain/fanout checks for
 -- the descriptive analysis views). Reference totals: 167400 measurements,
 -- 9300 cabins, 1860 batches, 233 process events, 393409 bridge links.
@@ -12,8 +17,16 @@ FROM (
     UNION ALL SELECT 'v_shift_quality_daily', sum(measurement_count) FROM v_shift_quality_daily
     UNION ALL SELECT 'v_measurement_point_quality', sum(measurement_count) FROM v_measurement_point_quality
 ) AS totals
-WHERE total <> (SELECT count(*) FROM fact_quality_measurement);
+WHERE total IS DISTINCT FROM (SELECT count(*) FROM fact_quality_measurement)
+    ) THEN
+        RAISE EXCEPTION 'validate_aggregates: check 1 failed';
+    END IF;
+END
+$validation$;
 
+DO $validation$
+BEGIN
+    IF EXISTS (
 -- 2. Row counts must equal distinct dimension keys (no duplicate/missing groups).
 SELECT 'v_cabin_quality' AS view_name, count(*) AS row_count, (SELECT count(*) FROM dim_cabin) AS expected
 FROM v_cabin_quality
@@ -25,31 +38,68 @@ HAVING count(*) <> (SELECT count(*) FROM dim_batch)
 UNION ALL
 SELECT 'v_measurement_point_quality', count(*), (SELECT count(*) FROM dim_measurement_point)
 FROM v_measurement_point_quality
-HAVING count(*) <> (SELECT count(*) FROM dim_measurement_point);
+HAVING count(*) <> (SELECT count(*) FROM dim_measurement_point)
+    ) THEN
+        RAISE EXCEPTION 'validate_aggregates: check 2 failed';
+    END IF;
+END
+$validation$;
 
+DO $validation$
+BEGIN
+    IF EXISTS (
 -- 3. Each measurement point covers every cabin exactly once (9300 per point).
 SELECT point_code, measurement_count
 FROM v_measurement_point_quality
-WHERE measurement_count <> (SELECT count(*) FROM dim_cabin);
+WHERE measurement_count <> (SELECT count(*) FROM dim_cabin)
+    ) THEN
+        RAISE EXCEPTION 'validate_aggregates: check 3 failed';
+    END IF;
+END
+$validation$;
 
+DO $validation$
+BEGIN
+    IF EXISTS (
 -- 4. Event-evaluation join must stay 1:1 with fact_process_event (no batch fanout).
 SELECT
     (SELECT count(*) FROM fact_process_event) AS event_row_count,
     (SELECT count(*) FROM v_event_evaluation_context) AS view_row_count
 WHERE (SELECT count(*) FROM fact_process_event)
-   <> (SELECT count(*) FROM v_event_evaluation_context);
+   <> (SELECT count(*) FROM v_event_evaluation_context)
+    ) THEN
+        RAISE EXCEPTION 'validate_aggregates: check 4 failed';
+    END IF;
+END
+$validation$;
 
+DO $validation$
+BEGIN
+    IF EXISTS (
 -- 5. Robot attribution is bridge-grain, not measurement-grain: confirm the
 -- expected fanout equals total bridge links, not the 167400 measurement count.
 SELECT
     (SELECT sum(linked_measurement_count) FROM v_robot_attribution_quality) AS summed_linked_measurements,
     (SELECT count(*) FROM bridge_measurement_robot) AS bridge_row_count
 WHERE (SELECT sum(linked_measurement_count) FROM v_robot_attribution_quality)
-   <> (SELECT count(*) FROM bridge_measurement_robot);
+   IS DISTINCT FROM (SELECT count(*) FROM bridge_measurement_robot)
+    ) THEN
+        RAISE EXCEPTION 'validate_aggregates: check 5 failed';
+    END IF;
+END
+$validation$;
 
+DO $validation$
+BEGIN
+    IF EXISTS (
 -- 6. Confirm robot linkage stays within the documented 1-4 contributors per
 -- measurement; a violation here would explain any unexpected fanout above.
 SELECT measurement_id, count(*) AS robot_count
 FROM bridge_measurement_robot
 GROUP BY measurement_id
-HAVING count(*) NOT BETWEEN 1 AND 4;
+HAVING count(*) NOT BETWEEN 1 AND 4
+    ) THEN
+        RAISE EXCEPTION 'validate_aggregates: check 6 failed';
+    END IF;
+END
+$validation$;

@@ -4,6 +4,8 @@ from datetime import datetime, time, timedelta
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import uuid
 
 import numpy as np
@@ -529,7 +531,8 @@ def production_spc_results():
                                baseline_id, measured_value, moving_range,
                                center_line, sigma, i_lcl, i_ucl,
                                mr_center, mr_ucl,
-                               rule_1, rule_2, rule_3, rule_4, spc_signal
+                               rule_1, rule_2, rule_3, rule_4, spc_signal,
+                               spc_evaluation_status
                         FROM v_spc_rule_results
                         ORDER BY measurement_timestamp, measurement_id
                         """
@@ -543,7 +546,8 @@ def production_spc_results():
                                booth, measurement_point, shift_id,
                                shift_name, shift_instance, measured_value,
                                moving_range, center_line, sigma, lcl, ucl,
-                               rule_1, rule_2, rule_3, rule_4, spc_signal
+                               rule_1, rule_2, rule_3, rule_4, spc_signal,
+                               baseline_id, spc_evaluation_status
                         FROM v_spc_rule_results_booth01_a_l1
                         ORDER BY measurement_timestamp, measurement_id
                         """
@@ -1359,12 +1363,16 @@ def test_unbased_and_expired_measurements_have_no_limits_or_signals(
         "mr_center",
         "mr_ucl",
     ]
-    rule_columns = ["rule_1", "rule_2", "rule_3", "rule_4", "spc_signal"]
+    rule_columns = ["rule_1", "rule_2", "rule_3", "rule_4"]
 
     assert unbased[limit_columns].isna().all().all()
     assert not unbased[rule_columns].astype(bool).any().any()
+    assert unbased["spc_signal"].isna().all()
+    assert unbased["spc_evaluation_status"].eq("NOT_EVALUATED").all()
     assert expired[limit_columns].isna().all().all()
     assert not expired[rule_columns].astype(bool).any().any()
+    assert expired["spc_signal"].isna().all()
+    assert expired["spc_evaluation_status"].eq("NOT_EVALUATED").all()
 
 
 def test_compatibility_view_preserves_legacy_columns(production_spc_results):
@@ -1389,9 +1397,14 @@ def test_compatibility_view_preserves_legacy_columns(production_spc_results):
         "rule_3",
         "rule_4",
         "spc_signal",
+        "baseline_id",
+        "spc_evaluation_status",
     ]
     assert compatibility_results["measurement_id"].tolist() == (
         results["measurement_id"].tolist()
+    )
+    assert compatibility_results["spc_evaluation_status"].tolist() == (
+        results["spc_evaluation_status"].tolist()
     )
     assert np.allclose(
         compatibility_results["lcl"].astype(float),
@@ -1403,3 +1416,157 @@ def test_compatibility_view_preserves_legacy_columns(production_spc_results):
         results["i_ucl"].astype(float),
         equal_nan=True,
     )
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_drift_validation_psql_exit_status(corrupt):
+    database_url = os.environ.get("SPC_TEST_DATABASE_URL")
+    psql = shutil.which("psql")
+    if not database_url or not psql:
+        pytest.skip("SPC_TEST_DATABASE_URL and psql are required")
+    error = _test_database_url_error(database_url)
+    if error:
+        pytest.fail(f"{error}; refusing to connect")
+    url = make_url(database_url)
+    environment = os.environ.copy()
+    if url.password is not None:
+        environment["PGPASSWORD"] = url.password
+    script = """
+        CREATE TEMP VIEW v_capability_measurements_booth01_a_l1 AS
+        SELECT id AS measurement_id,
+               timestamp '2026-01-01 06:00' + ((id - 1) / 10) * interval '8 hours' AS shift_instance,
+               1 AS shift_id, 'SHIFT_01' AS shift_name,
+               timestamp '2026-01-01 06:00' + ((id - 1) / 10) * interval '8 hours'
+                   + ((id - 1) % 10) * interval '1 minute' AS measurement_timestamp,
+               date '2026-01-01' AS production_month,
+               (id % 10)::numeric AS measured_value, id <= 56 AS is_oos,
+               CASE WHEN id <= 450 THEN NULL ELSE 1 END AS baseline_id,
+               CASE WHEN id <= 450 THEN 'NOT_EVALUATED' ELSE 'EVALUATED' END AS spc_evaluation_status,
+               CASE WHEN id <= 450 THEN NULL ELSE id % 19 = 0 END AS spc_signal
+        FROM generate_series(1, 4650) AS id;
+        CREATE TEMP VIEW v_drift_shift_measurements_booth01_a_l1 AS
+        SELECT * FROM v_capability_measurements_booth01_a_l1
+    """ + (" WHERE measurement_id <> 1;" if corrupt else ";")
+    result = subprocess.run(
+        [psql, "-X", "-w", "-q", "-h", url.host, "-p", str(url.port),
+         "-U", url.username, "-d", url.database, "-c", script,
+         "-f", str(REPO_ROOT / "sql" / "analysis" / "validate_drift_shift_analysis.sql")],
+        text=True, capture_output=True, env=environment, timeout=60,
+    )
+    if corrupt:
+        assert result.returncode != 0
+        assert "Drift input totals invalid" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+
+
+def test_sql_signal_summary_excludes_unassessed_rows():
+    database_url = os.environ.get("SPC_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("SPC_TEST_DATABASE_URL is required")
+    engine = _create_test_engine(database_url)
+    source = (REPO_ROOT / "sql" / "analysis" / "spc_signal_summary.sql").read_text(
+        encoding="utf-8"
+    )
+    overall, remainder = source.split("-- Production-month performance", 1)
+    monthly_body, remainder = remainder.split("-- Actual shift-instance performance", 1)
+    shift_body, rule_body = remainder.split("-- Long-form rule counts/rates", 1)
+    monthly = "-- Production-month performance" + monthly_body
+    shifts = "-- Actual shift-instance performance" + shift_body
+    rules = "-- Long-form rule counts/rates" + rule_body
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                connection.execute(text("""
+                    CREATE TEMP VIEW v_spc_rule_results_booth01_a_l1 AS
+                    SELECT id AS measurement_id,
+                           timestamp '2026-01-01' + (id - 1) * interval '1 month'
+                               AS measurement_timestamp,
+                           'BOOTH_01' AS booth, 'A-L1' AS measurement_point,
+                           CASE WHEN id <= 2 THEN timestamp '2026-01-01'
+                                ELSE timestamp '2026-02-01' END AS shift_instance,
+                           1 AS shift_id, 'SHIFT_01' AS shift_name,
+                           id = 1 AS rule_1, false AS rule_2, false AS rule_3, false AS rule_4,
+                           CASE WHEN id > 2 THEN NULL ELSE id = 1 END AS spc_signal
+                    FROM generate_series(1, 4) AS id
+                """))
+                connection.execute(text("""
+                    CREATE TEMP VIEW v_measurement_enriched AS
+                    SELECT id AS measurement_id,
+                           CASE WHEN id <= 2 THEN timestamp '2026-01-01'
+                                ELSE timestamp '2026-02-01' END AS production_timestamp,
+                           false AS is_oos
+                    FROM generate_series(1, 4) AS id
+                """))
+                total = connection.execute(text(overall)).mappings().one()
+                months = connection.execute(text(monthly)).mappings().all()
+                shift_rows = connection.execute(text(shifts)).mappings().all()
+                rule_rows = connection.execute(text(rules)).mappings().all()
+                assert total["total_measurements"] == 4
+                assert total["evaluated_measurements"] == 2
+                assert total["signal_measurements"] == 1
+                assert float(total["signal_rate"]) == pytest.approx(0.5)
+                assert float(total["rule_1_rate"]) == pytest.approx(0.5)
+                assert float(months[0]["signal_rate"]) == pytest.approx(0.5)
+                assert months[1]["evaluated_measurements"] == 0
+                assert months[1]["signal_rate"] is None
+                assert float(shift_rows[0]["signal_rate"]) == pytest.approx(0.5)
+                assert shift_rows[1]["signal_rate"] is None
+                overall_r1 = next(
+                    row for row in rule_rows
+                    if row["summary_scope"] == "OVERALL" and row["rule_name"] == "RULE_1"
+                )
+                uncovered_r1 = next(
+                    row for row in rule_rows
+                    if row["summary_scope"] == "SHIFT_INSTANCE"
+                    and row["shift_instance"].month == 2 and row["rule_name"] == "RULE_1"
+                )
+                assert float(overall_r1["rule_signal_rate"]) == pytest.approx(0.5)
+                assert uncovered_r1["rule_signal_rate"] is None
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_capability_validation_psql_exit_status(corrupt):
+    database_url = os.environ.get("SPC_TEST_DATABASE_URL")
+    psql = shutil.which("psql")
+    if not database_url or not psql:
+        pytest.skip("SPC_TEST_DATABASE_URL and psql are required")
+    error = _test_database_url_error(database_url)
+    if error:
+        pytest.fail(f"{error}; refusing to connect")
+    url = make_url(database_url)
+    environment = os.environ.copy()
+    if url.password is not None:
+        environment["PGPASSWORD"] = url.password
+    script = """
+        CREATE TEMP VIEW v_measurement_enriched AS
+        SELECT id AS measurement_id, false AS is_oos, 'BOOTH_01' AS booth_name,
+               'A-L1' AS point_code, 'Coating Thickness' AS characteristic,
+               'um' AS unit, 70 AS lsl, 75 AS target, 80 AS usl
+        FROM generate_series(1, 2) AS id;
+        CREATE TEMP VIEW v_spc_rule_results_booth01_a_l1 AS
+        SELECT id AS measurement_id, CASE WHEN id = 1 THEN NULL ELSE 1 END AS baseline_id,
+               CASE WHEN id = 1 THEN NULL ELSE false END AS spc_signal,
+               CASE WHEN id = 1 THEN 'NOT_EVALUATED' ELSE 'EVALUATED' END AS spc_evaluation_status
+        FROM generate_series(1, 2) AS id;
+        CREATE TEMP VIEW v_capability_measurements_booth01_a_l1 AS
+        SELECT measurement_id, is_oos, spc_signal, baseline_id, spc_evaluation_status
+        FROM v_measurement_enriched JOIN v_spc_rule_results_booth01_a_l1 USING (measurement_id)
+    """ + (" WHERE measurement_id <> 1;" if corrupt else ";")
+    result = subprocess.run(
+        [psql, "-X", "-w", "-q", "-h", url.host, "-p", str(url.port),
+         "-U", url.username, "-d", url.database, "-c", script,
+         "-f", str(REPO_ROOT / "sql" / "analysis" / "validate_capability_inputs.sql")],
+        text=True, capture_output=True, env=environment, timeout=60,
+    )
+    if corrupt:
+        assert result.returncode != 0
+        assert "Capability input does not reconcile" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert "PASS" in result.stdout

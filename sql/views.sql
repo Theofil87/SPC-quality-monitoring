@@ -305,7 +305,12 @@ SELECT
     rule_2,
     rule_3,
     rule_4,
-    (rule_1 OR rule_2 OR rule_3 OR rule_4) AS spc_signal
+    CASE WHEN baseline_id IS NOT NULL
+         THEN (rule_1 OR rule_2 OR rule_3 OR rule_4)
+    END AS spc_signal,
+    CASE WHEN baseline_id IS NULL THEN 'NOT_EVALUATED'
+         ELSE 'EVALUATED'
+    END AS spc_evaluation_status
 FROM signals;
 
 CREATE OR REPLACE VIEW v_spc_rule_results_booth01_a_l1 AS
@@ -327,12 +332,17 @@ SELECT
     rule_2,
     rule_3,
     rule_4,
-    spc_signal
+    spc_signal,
+    baseline_id,
+    spc_evaluation_status
 FROM v_spc_rule_results
 WHERE booth = 'BOOTH_01'
   AND measurement_point = 'A-L1';
 
 CREATE OR REPLACE VIEW v_capability_measurements_booth01_a_l1 AS
+WITH spc AS MATERIALIZED (
+    SELECT * FROM v_spc_rule_results_booth01_a_l1
+)
 SELECT
         measurement.measurement_id,
         measurement.measurement_timestamp,
@@ -356,9 +366,11 @@ SELECT
         spc.rule_2,
         spc.rule_3,
         spc.rule_4,
-        spc.spc_signal
+        spc.spc_signal,
+        spc.baseline_id,
+        spc.spc_evaluation_status
 FROM v_measurement_enriched AS measurement
-JOIN v_spc_rule_results_booth01_a_l1 AS spc USING (measurement_id)
+JOIN spc USING (measurement_id)
 WHERE measurement.booth_name = 'BOOTH_01'
     AND measurement.point_code = 'A-L1'
     AND measurement.characteristic = 'Coating Thickness'
@@ -396,7 +408,9 @@ SELECT
     rule_2,
     rule_3,
     rule_4,
-    spc_signal
+    spc_signal,
+    baseline_id,
+    spc_evaluation_status
 FROM v_capability_measurements_booth01_a_l1;
 
 CREATE OR REPLACE VIEW v_production_volume AS

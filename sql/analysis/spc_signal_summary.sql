@@ -3,7 +3,9 @@
 -- flags for investigation, not confirmed special causes.
 
 -- Overall performance. Rule counts can overlap; spc_signal is the rule OR.
-WITH base AS (
+WITH spc_source AS MATERIALIZED (
+    SELECT * FROM v_spc_rule_results_booth01_a_l1
+), base AS (
     SELECT
         spc.measurement_id,
         spc.measurement_timestamp,
@@ -18,8 +20,8 @@ WITH base AS (
         spc.rule_2,
         spc.rule_3,
         spc.rule_4,
-        (spc.rule_1 OR spc.rule_2 OR spc.rule_3 OR spc.rule_4) AS any_rule_signal
-    FROM v_spc_rule_results_booth01_a_l1 AS spc
+        spc.spc_signal AS any_rule_signal
+    FROM spc_source AS spc
     JOIN v_measurement_enriched AS measurement USING (measurement_id)
 )
 SELECT
@@ -27,27 +29,30 @@ SELECT
     booth,
     measurement_point,
     count(DISTINCT measurement_id) AS total_measurements,
+    count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal IS NOT NULL) AS evaluated_measurements,
     count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal) AS signal_measurements,
     count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal)::numeric
-        / nullif(count(DISTINCT measurement_id), 0) AS signal_rate,
+        / nullif(count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal IS NOT NULL), 0) AS signal_rate,
     count(DISTINCT measurement_id) FILTER (WHERE rule_1) AS rule_1_measurements,
     count(DISTINCT measurement_id) FILTER (WHERE rule_1)::numeric
-        / nullif(count(DISTINCT measurement_id), 0) AS rule_1_rate,
+        / nullif(count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal IS NOT NULL), 0) AS rule_1_rate,
     count(DISTINCT measurement_id) FILTER (WHERE rule_2) AS rule_2_measurements,
     count(DISTINCT measurement_id) FILTER (WHERE rule_2)::numeric
-        / nullif(count(DISTINCT measurement_id), 0) AS rule_2_rate,
+        / nullif(count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal IS NOT NULL), 0) AS rule_2_rate,
     count(DISTINCT measurement_id) FILTER (WHERE rule_3) AS rule_3_measurements,
     count(DISTINCT measurement_id) FILTER (WHERE rule_3)::numeric
-        / nullif(count(DISTINCT measurement_id), 0) AS rule_3_rate,
+        / nullif(count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal IS NOT NULL), 0) AS rule_3_rate,
     count(DISTINCT measurement_id) FILTER (WHERE rule_4) AS rule_4_measurements,
     count(DISTINCT measurement_id) FILTER (WHERE rule_4)::numeric
-        / nullif(count(DISTINCT measurement_id), 0) AS rule_4_rate
+        / nullif(count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal IS NOT NULL), 0) AS rule_4_rate
 FROM base
 GROUP BY booth, measurement_point
 ORDER BY booth, measurement_point;
 
 -- Production-month performance and specification OOS, reported separately.
-WITH base AS (
+WITH spc_source AS MATERIALIZED (
+    SELECT * FROM v_spc_rule_results_booth01_a_l1
+), base AS (
     SELECT
         spc.measurement_id,
         spc.measurement_timestamp,
@@ -59,8 +64,8 @@ WITH base AS (
         spc.rule_2,
         spc.rule_3,
         spc.rule_4,
-        (spc.rule_1 OR spc.rule_2 OR spc.rule_3 OR spc.rule_4) AS any_rule_signal
-    FROM v_spc_rule_results_booth01_a_l1 AS spc
+        spc.spc_signal AS any_rule_signal
+    FROM spc_source AS spc
     JOIN v_measurement_enriched AS measurement USING (measurement_id)
 )
 SELECT
@@ -68,9 +73,10 @@ SELECT
     booth,
     measurement_point,
     count(DISTINCT measurement_id) AS total_measurements,
+    count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal IS NOT NULL) AS evaluated_measurements,
     count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal) AS signal_measurements,
     count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal)::numeric
-        / nullif(count(DISTINCT measurement_id), 0) AS signal_rate,
+        / nullif(count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal IS NOT NULL), 0) AS signal_rate,
     count(DISTINCT measurement_id) FILTER (WHERE is_oos) AS oos_measurements,
     count(DISTINCT measurement_id) FILTER (WHERE is_oos)::numeric
         / nullif(count(DISTINCT measurement_id), 0) AS oos_rate
@@ -80,7 +86,9 @@ ORDER BY production_month, booth, measurement_point;
 
 -- Actual shift-instance performance. shift_id/shift_name identify shift type;
 -- shift_instance identifies the concrete scheduled shift, including overnights.
-WITH base AS (
+WITH spc_source AS MATERIALIZED (
+    SELECT * FROM v_spc_rule_results_booth01_a_l1
+), base AS (
     SELECT
         spc.measurement_id,
         spc.measurement_timestamp,
@@ -94,8 +102,8 @@ WITH base AS (
         spc.rule_2,
         spc.rule_3,
         spc.rule_4,
-        (spc.rule_1 OR spc.rule_2 OR spc.rule_3 OR spc.rule_4) AS any_rule_signal
-    FROM v_spc_rule_results_booth01_a_l1 AS spc
+        spc.spc_signal AS any_rule_signal
+    FROM spc_source AS spc
     JOIN v_measurement_enriched AS measurement USING (measurement_id)
 )
 SELECT
@@ -105,9 +113,10 @@ SELECT
     booth,
     measurement_point,
     count(DISTINCT measurement_id) AS total_measurements,
+    count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal IS NOT NULL) AS evaluated_measurements,
     count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal) AS signal_measurements,
     count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal)::numeric
-        / nullif(count(DISTINCT measurement_id), 0) AS signal_rate,
+        / nullif(count(DISTINCT measurement_id) FILTER (WHERE any_rule_signal IS NOT NULL), 0) AS signal_rate,
     count(DISTINCT measurement_id) FILTER (WHERE is_oos) AS oos_measurements,
     count(DISTINCT measurement_id) FILTER (WHERE is_oos)::numeric
         / nullif(count(DISTINCT measurement_id), 0) AS oos_rate,
@@ -118,8 +127,10 @@ GROUP BY shift_instance, shift_id, shift_name, booth, measurement_point
 ORDER BY shift_instance, shift_id, booth, measurement_point;
 
 -- Long-form rule counts/rates by overall stream, production month, and actual
--- shift instance. Each rule's denominator is all measurements in that scope.
-WITH base AS (
+-- shift instance. Each rule's denominator is evaluated measurements in that scope.
+WITH spc_source AS MATERIALIZED (
+    SELECT * FROM v_spc_rule_results_booth01_a_l1
+), base AS (
     SELECT
         spc.measurement_id,
         spc.booth,
@@ -131,8 +142,9 @@ WITH base AS (
         spc.rule_1,
         spc.rule_2,
         spc.rule_3,
-        spc.rule_4
-    FROM v_spc_rule_results_booth01_a_l1 AS spc
+        spc.rule_4,
+        spc.spc_signal
+    FROM spc_source AS spc
     JOIN v_measurement_enriched AS measurement USING (measurement_id)
 ), rule_flags AS (
     SELECT
@@ -160,6 +172,7 @@ WITH base AS (
         CASE WHEN grouping(shift_name) = 0 THEN shift_name ELSE NULL::varchar END AS shift_name,
         rule_name,
         count(DISTINCT measurement_id) AS total_measurements,
+        count(DISTINCT measurement_id) FILTER (WHERE spc_signal IS NOT NULL) AS evaluated_measurements,
         count(DISTINCT measurement_id) FILTER (WHERE is_triggered) AS rule_signal_measurements
     FROM rule_flags
     GROUP BY GROUPING SETS (
@@ -176,8 +189,9 @@ SELECT
     shift_name,
     rule_name,
     total_measurements,
+    evaluated_measurements,
     rule_signal_measurements,
-    rule_signal_measurements::numeric / nullif(total_measurements, 0) AS rule_signal_rate
+    rule_signal_measurements::numeric / nullif(evaluated_measurements, 0) AS rule_signal_rate
 FROM scoped
 ORDER BY
     CASE summary_scope WHEN 'OVERALL' THEN 1 WHEN 'PRODUCTION_MONTH' THEN 2 ELSE 3 END,

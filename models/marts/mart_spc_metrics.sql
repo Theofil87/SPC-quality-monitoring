@@ -15,7 +15,9 @@ select
     spc.rule_2,
     spc.rule_3,
     spc.rule_4,
-    spc.spc_signal
+    spc.spc_signal,
+    spc.baseline_id,
+    spc.spc_evaluation_status
 from {{ ref('mart_measurements') }} as measurement
 join {{ source('paintshop', 'v_spc_rule_results_booth01_a_l1') }} as spc
     using (measurement_id)

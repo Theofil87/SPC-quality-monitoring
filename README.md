@@ -22,7 +22,7 @@ For the analysed stream the answer is: **stability is not demonstrated** (SPC si
 - I-MR SPC rule detection and signal summaries in SQL
 - Process capability (Cp / Cpk / Pp / Ppk) in Python with a hand-checked fixture
 - Drift and shift-to-shift variation analysis on actual shift instances
-- 44 Python tests plus SQL regression fixtures
+- Automated Python, dashboard, SQL regression and optional PostgreSQL integration tests
 
 The Streamlit dashboard provides quality reporting and baseline-based SPC monitoring. Root-cause analysis is not implemented. The `fact_process_event` ground truth is not used by the analysis notebooks or dbt models.
 
@@ -70,20 +70,28 @@ Synthetic data generator (Python, fixed seed)
 
 ## 📈 Results (BOOTH_01 / A-L1, synthetic)
 
-From the saved output of `notebooks/drift_shift_variation_analysis.ipynb`:
+The counts below describe the canonical synthetic bootstrap; validation checks
+consistency rather than asserting a fixed signal count. Capability, variation,
+and trend figures describe the complete history.
 
 | Item | Result |
 |---|---|
 | Measurements | 4,650 |
 | Actual shift instances | 465 (10 measurements each; overnight shifts kept whole) |
 | Out-of-specification measurements | 56 |
-| SPC-signal measurements | 174 |
+| SPC-signal measurements | 267 |
+| SPC evaluated / not evaluated | 4,200 / 450 |
 | Cp / Cpk (within sigma 1.384 µm) | 1.204 / 1.139 |
 | Pp / Ppk (overall sigma 1.545 µm) | 1.078 / 1.020 |
 | Within-shift / between-shift sum of squares | 79.4% / 20.6% |
 | Trend slope of shift-instance means | −0.000424 µm/day, 95% CI [−0.001648, 0.000800] |
 
 **Conclusion:** there is insufficient evidence to describe sustained drift under the predefined framework. The slope interval includes zero, and the other predeclared conditions are not all met. This is not proof that no drift exists. The analysis is observational and does not establish causes.
+
+The 267 signals are among 4,200 evaluated measurements (6.36%); the first
+450 measurements have no applicable baseline and are not signal-free.
+The earlier 174 result used exploratory limits fitted to the entire history
+and is not comparable to the current fixed baseline.
 
 Cp and Cpk exceed Pp and Ppk, which is compatible with overall spread being larger than the short-term estimate. About a fifth of the total variation lies between shifts. Signals and out-of-specification values are concentrated in some months (for example April), as the notebook's monthly table shows.
 
@@ -135,30 +143,52 @@ python -m venv .venv
 # activate the environment, then:
 pip install -r requirements.txt
 
-# 1. Generate the CSV files (data/raw/*.csv is git-ignored)
-python -m src.data_generation.generate_data
-
-# 2. Create the database and schema
+# 1. Create an empty database
 createdb spc_quality_monitoring
-psql -X -v ON_ERROR_STOP=1 -d spc_quality_monitoring -f sql/schema.sql
 
-# 3. Load the CSVs (psql must run inside data/raw; do not run sql/seed.sql in this database)
-cd data/raw
-psql -X -v ON_ERROR_STOP=1 -d spc_quality_monitoring -f ../../sql/load.sql
-cd ../..
+# 2. Build the complete canonical SPC database
+python -m src.bootstrap_database
 
-# 4. Create the analytical views
-psql -X -v ON_ERROR_STOP=1 -d spc_quality_monitoring -f sql/views.sql
-
-# 5. Tests
+# 3. Tests
 python -m pytest tests/ -q
 
-# 6. dbt (create ~/.dbt/profiles.yml from profiles.yml.example; keep credentials outside Git)
+# 4. dbt (create ~/.dbt/profiles.yml from profiles.yml.example; keep credentials outside Git)
 dbt debug
 dbt build
 ```
 
-Optional SQL checks: run `sql/analysis/test_*.sql` (regression fixtures) and `sql/analysis/validate_*.sql` (live reconciliation) with `psql` in the same way.
+`src.bootstrap_database` is the canonical database entry point. It refuses to
+run unless the `public` schema is empty. It generates the seeded CSVs in a
+temporary directory, applies `schema.sql`, applies the SPC baseline migration,
+loads all dimensions and measurements, fits the baseline with
+`src.spc_monitoring.fit_baseline`, persists the draft, activates it, creates
+the analytical views, and runs the data/SPC validation scripts.
+
+The default baseline is BOOTH_01 / A-L1 / Coating Thickness and begins at the
+first scheduled shift start. The exclusive fitting window is 18 calendar days,
+and the existing I-MR implementation supplies every calculated limit; the
+bootstrap does not contain a second SPC calculation. The database connection
+uses `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD`, or a single
+`--database-url` / `SPC_BOOTSTRAP_DATABASE_URL` value. Passwords are never
+written to generated files. For reproducibility, this synthetic baseline is
+recorded as approved by `Canonical bootstrap` at the exclusive window end; a
+real production approval process is intentionally outside this demo.
+
+The synthetic fitting window has not been established as stable: a
+retrospective application of its fitted limits flagged seven observations.
+Signals warrant investigation, not automatic exclusion or proof of special
+causes. No production baseline approval or stability claim is implied.
+
+The canonical bootstrap runs the core SQL regression fixtures automatically.
+Additional optional checks are the `sql/analysis/test_*.sql` regression fixtures
+and `sql/analysis/validate_*.sql` live reconciliation scripts. Run validation
+scripts with `psql -X -v ON_ERROR_STOP=1 -f <script>`; a failed check raises
+an error and makes `psql` exit nonzero. Set `ON_ERROR_STOP` on the parent
+session as well when including a script with `\i`.
+
+For an existing database, deploy the updated view definitions with
+`psql -X -v ON_ERROR_STOP=1 -f sql/views.sql` before using the updated
+analysis or dashboard code. This replaces views, not baseline records.
 
 **Authentication.** The notebooks call `psql` with `-w`, so they never prompt for a password and never store one. Supply credentials outside the notebook through a `pgpass` file or `PGPASSWORD`. The notebooks default to database `spc_quality_monitoring` and user `postgres` and honour `PGDATABASE`, `PGUSER`, `PGHOST` and `PGPORT`; on Windows they also point `PGPASSFILE` at `%APPDATA%\postgresql\pgpass.conf` if it is unset. If the database cannot be reached, the notebooks print `LIVE ANALYSIS NOT EXECUTED` and skip the data-dependent cells.
 
@@ -196,7 +226,7 @@ Completed: synthetic dataset, PostgreSQL schema and load, SQL analytics and vali
 - Extend capability reporting beyond BOOTH_01 / A-L1 to other booths and measurement points
 - Add control-chart figures to the documentation
 - Compare SPC signals with the injected event ground truth as a separate, clearly labelled evaluation
-- Add an interactive dashboard (not started)
+- Expand the existing dashboard beyond BOOTH_01 / A-L1 only after the canonical bootstrap is stable
 
 ## 👤 Author
 

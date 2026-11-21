@@ -54,7 +54,7 @@ def _row(measurement_id, baseline_id=1, **overrides):
         "rule_2": False,
         "rule_3": False,
         "rule_4": False,
-        "spc_signal": False,
+        "spc_signal": False if baseline_id is not None else None,
     }
     return row | overrides
 
@@ -740,6 +740,15 @@ def test_uncovered_spc_signal_is_rejected(run_dashboard, flags):
     assert any("signals were returned" in error.value for error in app.error)
     assert not app.metric
     assert not app.get("plotly_chart")
+
+
+@pytest.mark.parametrize(
+    "row", [_row(1, None, spc_signal=False), _row(1, 1, spc_signal=None)]
+)
+def test_spc_signal_nullability_must_match_coverage(run_dashboard, row):
+    app = run_dashboard([row])
+    assert any("evaluation status does not match" in error.value for error in app.error)
+    assert not app.metric
 
 
 def test_zero_coverage_shows_raw_values_without_control_legends(run_dashboard):

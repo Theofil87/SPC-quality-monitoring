@@ -22,6 +22,10 @@ dbt_packages/
 logs/
 profiles.yml
 
+# Local test run output
+/test_output.log
+pytest*.log
+
 # Local database backups
 *.dump
 *.sql.gz

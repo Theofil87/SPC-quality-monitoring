@@ -1,6 +1,5 @@
 -- Reproducible descriptive outputs for the validated BOOTH_01 / A-L1 stream.
--- Execute after sql/views.sql. All rates use the measurement count in their
--- own scope. SPC flags are reused; they are not recalculated or filtered.
+-- OOS rates use all measurements; SPC rates use evaluated measurements only.
 
 -- 1. Production-month summary.
 SELECT
@@ -15,8 +14,9 @@ SELECT
     count(DISTINCT measurement_id) FILTER (WHERE is_oos)::numeric
         / nullif(count(DISTINCT measurement_id), 0) AS oos_rate,
     count(DISTINCT measurement_id) FILTER (WHERE spc_signal) AS spc_signal_count,
+    count(DISTINCT measurement_id) FILTER (WHERE spc_signal IS NOT NULL) AS spc_evaluated_count,
     count(DISTINCT measurement_id) FILTER (WHERE spc_signal)::numeric
-        / nullif(count(DISTINCT measurement_id), 0) AS spc_signal_rate,
+        / nullif(count(DISTINCT measurement_id) FILTER (WHERE spc_signal IS NOT NULL), 0) AS spc_signal_rate,
     count(DISTINCT measurement_id) FILTER (WHERE rule_1) AS rule_1_count,
     count(DISTINCT measurement_id) FILTER (WHERE rule_2) AS rule_2_count,
     count(DISTINCT measurement_id) FILTER (WHERE rule_3) AS rule_3_count,
@@ -44,8 +44,9 @@ SELECT
     count(DISTINCT measurement_id) FILTER (WHERE is_oos)::numeric
         / nullif(count(DISTINCT measurement_id), 0) AS oos_rate,
     count(DISTINCT measurement_id) FILTER (WHERE spc_signal) AS spc_signal_count,
+    count(DISTINCT measurement_id) FILTER (WHERE spc_signal IS NOT NULL) AS spc_evaluated_count,
     count(DISTINCT measurement_id) FILTER (WHERE spc_signal)::numeric
-        / nullif(count(DISTINCT measurement_id), 0) AS spc_signal_rate,
+        / nullif(count(DISTINCT measurement_id) FILTER (WHERE spc_signal IS NOT NULL), 0) AS spc_signal_rate,
     count(DISTINCT measurement_id) FILTER (WHERE rule_1) AS rule_1_count,
     count(DISTINCT measurement_id) FILTER (WHERE rule_2) AS rule_2_count,
     count(DISTINCT measurement_id) FILTER (WHERE rule_3) AS rule_3_count,
@@ -67,8 +68,9 @@ SELECT
     count(DISTINCT measurement_id) FILTER (WHERE is_oos)::numeric
         / nullif(count(DISTINCT measurement_id), 0) AS oos_rate,
     count(DISTINCT measurement_id) FILTER (WHERE spc_signal) AS spc_signal_count,
+    count(DISTINCT measurement_id) FILTER (WHERE spc_signal IS NOT NULL) AS spc_evaluated_count,
     count(DISTINCT measurement_id) FILTER (WHERE spc_signal)::numeric
-        / nullif(count(DISTINCT measurement_id), 0) AS spc_signal_rate,
+        / nullif(count(DISTINCT measurement_id) FILTER (WHERE spc_signal IS NOT NULL), 0) AS spc_signal_rate,
     count(DISTINCT measurement_id) FILTER (WHERE rule_1) AS rule_1_count,
     count(DISTINCT measurement_id) FILTER (WHERE rule_2) AS rule_2_count,
     count(DISTINCT measurement_id) FILTER (WHERE rule_3) AS rule_3_count,

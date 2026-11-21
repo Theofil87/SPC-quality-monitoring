@@ -275,15 +275,19 @@ if dashboard_section == "SPC monitoring":
         "rule_3": "Rule 3",
         "rule_4": "Rule 4",
     }
-    for column in rule_columns + ["spc_signal"]:
+    for column in rule_columns:
         spc_df[column] = spc_df[column].fillna(False).astype(bool)
 
     baseline_covered = spc_df["baseline_id"].notna()
+    spc_df["spc_signal"] = spc_df["spc_signal"].astype("boolean")
     limit_columns = ["center_line", "sigma", "i_ucl", "i_lcl", "mr_center", "mr_ucl"]
     for column in ["moving_range", *limit_columns]:
         spc_df[column] = pd.to_numeric(spc_df[column], errors="coerce")
     if (spc_df[rule_columns + ["spc_signal"]].any(axis=1) & ~baseline_covered).any():
         st.error("SPC rule flags or signals were returned for measurements without a baseline.")
+        st.stop()
+    if (spc_df["spc_signal"].isna() != ~baseline_covered).any():
+        st.error("SPC signal evaluation status does not match baseline coverage.")
         st.stop()
     if not np.isfinite(spc_df.loc[baseline_covered, limit_columns]).all().all():
         st.error("Some assigned baselines have missing or invalid control limits; SPC analysis cannot continue.")

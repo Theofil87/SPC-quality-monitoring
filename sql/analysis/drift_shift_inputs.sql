@@ -24,6 +24,8 @@ SELECT
     rule_2,
     rule_3,
     rule_4,
-    spc_signal
+    spc_signal,
+    baseline_id,
+    spc_evaluation_status
 FROM v_drift_shift_measurements_booth01_a_l1
 ORDER BY shift_instance, measurement_timestamp, measurement_id;

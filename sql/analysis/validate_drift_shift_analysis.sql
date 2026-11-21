@@ -1,115 +1,108 @@
--- Every statement returns zero rows when the drift/shift analysis contract is valid.
+-- Run with psql; a failed check raises an error and exits nonzero.
+-- Seeded measurement totals are fixed; signal totals depend on the assigned baselines.
+\set ON_ERROR_STOP on
 
--- 1. Canonical measurement grain and expected validated-stream totals.
-WITH totals AS (
-    SELECT
-        count(*) AS measurement_count,
-        count(DISTINCT measurement_id) AS unique_measurement_count,
-        count(DISTINCT shift_instance) AS shift_instance_count,
-        count(*) FILTER (WHERE is_oos) AS oos_count,
-        count(*) FILTER (WHERE spc_signal) AS spc_signal_count
-    FROM v_drift_shift_measurements_booth01_a_l1
-)
-SELECT *
-FROM totals
-WHERE measurement_count <> 4650
-   OR unique_measurement_count <> 4650
-   OR shift_instance_count <> 465
-   OR oos_count <> 56
-   OR spc_signal_count <> 174;
+DO $$
+DECLARE
+    totals record;
+BEGIN
+    SELECT count(*) AS measurement_count,
+           count(DISTINCT measurement_id) AS unique_count,
+           count(DISTINCT shift_instance) AS shift_count,
+           count(*) FILTER (WHERE is_oos) AS oos_count
+    INTO totals
+    FROM v_drift_shift_measurements_booth01_a_l1;
 
--- 2. Each concrete shift maps to exactly one type and contains 10 readings.
-SELECT shift_instance
-FROM v_drift_shift_measurements_booth01_a_l1
-GROUP BY shift_instance
-HAVING count(DISTINCT shift_id) <> 1
-    OR count(DISTINCT shift_name) <> 1
-    OR count(DISTINCT measurement_id) <> 10;
+    IF totals.measurement_count <> 4650 OR totals.unique_count <> 4650
+       OR totals.shift_count <> 465 OR totals.oos_count <> 56 THEN
+        RAISE EXCEPTION 'Drift input totals invalid: %', totals;
+    END IF;
 
--- 3. Overnight records retain the scheduled 22:00 start and remain inside it.
-SELECT measurement_id, shift_instance, measurement_timestamp
-FROM v_drift_shift_measurements_booth01_a_l1
-WHERE shift_name = 'SHIFT_03'
-  AND (
-      shift_instance::time <> time '22:00'
-      OR measurement_timestamp < shift_instance
-      OR measurement_timestamp >= shift_instance + interval '8 hours'
-  );
+    IF EXISTS (
+        WITH drift AS MATERIALIZED (
+            SELECT * FROM v_drift_shift_measurements_booth01_a_l1
+        ), source AS MATERIALIZED (
+            SELECT * FROM v_capability_measurements_booth01_a_l1
+        )
+        SELECT 1 FROM drift d
+        FULL JOIN source s USING (measurement_id)
+        WHERE d.measurement_id IS NULL OR s.measurement_id IS NULL
+           OR d.baseline_id IS DISTINCT FROM s.baseline_id
+           OR d.spc_evaluation_status IS DISTINCT FROM s.spc_evaluation_status
+           OR d.spc_signal IS DISTINCT FROM s.spc_signal
+           OR d.spc_evaluation_status IS DISTINCT FROM
+                CASE WHEN d.baseline_id IS NULL THEN 'NOT_EVALUATED' ELSE 'EVALUATED' END
+           OR (d.baseline_id IS NULL AND d.spc_signal IS NOT NULL)
+           OR (d.baseline_id IS NOT NULL AND d.spc_signal IS NULL)
+    ) THEN
+        RAISE EXCEPTION 'Drift SPC coverage or signal does not reconcile with source';
+    END IF;
 
--- 4. Every grouped scope reconciles measurement, OOS, and signal totals.
-WITH base AS (
-    SELECT * FROM v_drift_shift_measurements_booth01_a_l1
-), overall AS (
-    SELECT count(*) AS measurement_count, count(*) FILTER (WHERE is_oos) AS oos_count,
-           count(*) FILTER (WHERE spc_signal) AS signal_count FROM base
-), monthly AS (
-    SELECT production_month, count(*) AS measurement_count,
-           count(*) FILTER (WHERE is_oos) AS oos_count,
-           count(*) FILTER (WHERE spc_signal) AS signal_count
-    FROM base GROUP BY production_month
-), instances AS (
-    SELECT shift_instance, count(*) AS measurement_count,
-           count(*) FILTER (WHERE is_oos) AS oos_count,
-           count(*) FILTER (WHERE spc_signal) AS signal_count
-    FROM base GROUP BY shift_instance
-), types AS (
-    SELECT shift_id, count(*) AS measurement_count,
-           count(*) FILTER (WHERE is_oos) AS oos_count,
-           count(*) FILTER (WHERE spc_signal) AS signal_count
-    FROM base GROUP BY shift_id
-), grouped AS (
-    SELECT 'monthly' AS scope, sum(measurement_count) AS measurement_count,
-           sum(oos_count) AS oos_count, sum(signal_count) AS signal_count FROM monthly
-    UNION ALL
-    SELECT 'shift_instance', sum(measurement_count), sum(oos_count), sum(signal_count) FROM instances
-    UNION ALL
-    SELECT 'shift_type', sum(measurement_count), sum(oos_count), sum(signal_count) FROM types
-)
-SELECT grouped.*, overall.*
-FROM grouped CROSS JOIN overall
-WHERE grouped.measurement_count <> overall.measurement_count
-   OR grouped.oos_count <> overall.oos_count
-   OR grouped.signal_count <> overall.signal_count;
+    IF EXISTS (
+        SELECT 1 FROM v_drift_shift_measurements_booth01_a_l1
+        GROUP BY shift_instance
+        HAVING count(DISTINCT shift_id) <> 1
+            OR count(DISTINCT shift_name) <> 1
+            OR count(DISTINCT measurement_id) <> 10
+    ) THEN
+        RAISE EXCEPTION 'Invalid actual shift mapping or measurement count';
+    END IF;
 
--- 5. Rates use their own grouping denominator; no duplicate/missing IDs.
-WITH base AS (
-    SELECT * FROM v_drift_shift_measurements_booth01_a_l1
-), scoped AS (
-    SELECT 'MONTH' AS scope, production_month::text AS group_key,
-           count(*) AS measurement_count, count(*) FILTER (WHERE is_oos) AS oos_count,
-           count(*) FILTER (WHERE spc_signal) AS signal_count
-    FROM base GROUP BY production_month
-    UNION ALL
-    SELECT 'SHIFT_INSTANCE', shift_instance::text, count(*), count(*) FILTER (WHERE is_oos),
-           count(*) FILTER (WHERE spc_signal) FROM base GROUP BY shift_instance
-    UNION ALL
-    SELECT 'SHIFT_TYPE', shift_id::text, count(*), count(*) FILTER (WHERE is_oos),
-           count(*) FILTER (WHERE spc_signal) FROM base GROUP BY shift_id
-)
-SELECT *
-FROM scoped
-WHERE measurement_count <= 0
-   OR oos_count::numeric / measurement_count NOT BETWEEN 0 AND 1
-   OR signal_count::numeric / measurement_count NOT BETWEEN 0 AND 1;
+    IF EXISTS (
+        SELECT 1 FROM v_drift_shift_measurements_booth01_a_l1
+        WHERE shift_name = 'SHIFT_03'
+          AND (shift_instance::time <> time '22:00'
+               OR measurement_timestamp < shift_instance
+               OR measurement_timestamp >= shift_instance + interval '8 hours')
+    ) THEN
+        RAISE EXCEPTION 'Invalid overnight shift assignment';
+    END IF;
 
--- 6. Shift-decomposition identity using the raw canonical input.
-WITH base AS (
-    SELECT measured_value, shift_instance
-    FROM v_drift_shift_measurements_booth01_a_l1
-), overall AS (
-    SELECT avg(measured_value) AS overall_mean FROM base
-), instance_stats AS (
-    SELECT shift_instance, count(*) AS n, avg(measured_value) AS group_mean,
-           coalesce(stddev_samp(measured_value), 0) ^ 2 * greatest(count(*) - 1, 0) AS within_ss
-    FROM base
-    GROUP BY shift_instance
-), sums AS (
-    SELECT
-        (SELECT sum((measured_value - overall_mean) ^ 2) FROM base CROSS JOIN overall) AS total_ss,
-        sum(within_ss) AS within_ss,
-        sum(n * (group_mean - (SELECT overall_mean FROM overall)) ^ 2) AS between_ss
-    FROM instance_stats
-)
-SELECT *
-FROM sums
-WHERE abs(total_ss - within_ss - between_ss) > 0.000001;
+    IF EXISTS (
+        WITH base AS (
+            SELECT * FROM v_drift_shift_measurements_booth01_a_l1
+        ), overall AS (
+            SELECT count(*) AS n, count(*) FILTER (WHERE is_oos) AS oos,
+                   count(*) FILTER (WHERE spc_signal IS NOT NULL) AS evaluated,
+                   count(*) FILTER (WHERE spc_signal) AS signals FROM base
+        ), grouped AS (
+            SELECT grouping(production_month, shift_instance, shift_id) AS scope,
+                   count(*) AS n, count(*) FILTER (WHERE is_oos) AS oos,
+                   count(*) FILTER (WHERE spc_signal IS NOT NULL) AS evaluated,
+                   count(*) FILTER (WHERE spc_signal) AS signals
+            FROM base
+            GROUP BY GROUPING SETS ((production_month), (shift_instance), (shift_id))
+        ), summed AS (
+            SELECT scope, sum(n) AS n, sum(oos) AS oos,
+                   sum(evaluated) AS evaluated, sum(signals) AS signals
+            FROM grouped GROUP BY scope
+        )
+        SELECT 1 FROM summed CROSS JOIN overall
+        WHERE summed.n <> overall.n OR summed.oos <> overall.oos
+           OR summed.evaluated <> overall.evaluated OR summed.signals <> overall.signals
+    ) THEN
+        RAISE EXCEPTION 'Drift grouped totals do not reconcile';
+    END IF;
+
+    IF EXISTS (
+        WITH base AS (
+            SELECT measured_value, shift_instance FROM v_drift_shift_measurements_booth01_a_l1
+        ), overall AS (
+            SELECT avg(measured_value) AS mean FROM base
+        ), groups AS (
+            SELECT shift_instance, count(*) AS n, avg(measured_value) AS mean,
+                   coalesce(stddev_samp(measured_value), 0) ^ 2
+                     * greatest(count(*) - 1, 0) AS within_ss
+            FROM base GROUP BY shift_instance
+        ), sums AS (
+            SELECT (SELECT sum((measured_value - mean) ^ 2) FROM base CROSS JOIN overall) AS total_ss,
+                   sum(within_ss) AS within_ss,
+                   sum(n * (mean - (SELECT mean FROM overall)) ^ 2) AS between_ss
+            FROM groups
+        )
+        SELECT 1 FROM sums WHERE abs(total_ss - within_ss - between_ss) > 0.000001
+    ) THEN
+        RAISE EXCEPTION 'Shift variance decomposition does not reconcile';
+    END IF;
+END
+$$;

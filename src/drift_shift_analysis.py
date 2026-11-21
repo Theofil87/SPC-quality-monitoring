@@ -12,6 +12,8 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
+from src.spc_monitoring import summarize_signal_coverage
+
 
 _REQUIRED_COLUMNS = {
     "measurement_id", "measurement_timestamp", "production_month",
@@ -56,6 +58,7 @@ def _group_summary(data: pd.DataFrame, group_columns: list[str]) -> pd.DataFrame
         if len(group_columns) == 1:
             key = (key,)
         count = len(group)
+        evaluated_count, signal_count, signal_rate = summarize_signal_coverage(group["spc_signal"])
         values = group["measured_value"].astype(float)
         row = dict(zip(group_columns, key))
         row.update(
@@ -67,8 +70,10 @@ def _group_summary(data: pd.DataFrame, group_columns: list[str]) -> pd.DataFrame
             above_usl_count=int(group["above_usl"].fillna(False).astype(bool).sum()),
             oos_count=int(group["is_oos"].fillna(False).astype(bool).sum()),
             oos_rate=float(group["is_oos"].fillna(False).astype(bool).mean()),
-            spc_signal_count=int(group["spc_signal"].fillna(False).astype(bool).sum()),
-            spc_signal_rate=float(group["spc_signal"].fillna(False).astype(bool).mean()),
+            spc_signal_count=signal_count,
+            spc_evaluated_count=evaluated_count,
+            spc_not_evaluated_count=count - evaluated_count,
+            spc_signal_rate=signal_rate,
         )
         for rule in ("rule_1", "rule_2", "rule_3", "rule_4"):
             if rule in group:

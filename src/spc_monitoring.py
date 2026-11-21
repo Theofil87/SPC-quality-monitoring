@@ -18,6 +18,20 @@ _MEASUREMENT_QUANTUM = Decimal("0.001")
 _BASELINE_QUANTUM = Decimal("0.000001")
 
 
+def summarize_signal_coverage(signals: pd.Series) -> tuple[int, int, float | None]:
+    """Return evaluated count, signal count and rate for nullable SPC flags."""
+    evaluated = signals.dropna()
+    if not evaluated.isin([True, False]).all():
+        raise ValueError("spc_signal must contain only boolean or null values")
+    evaluated_count = len(evaluated)
+    signal_count = int(evaluated.astype(bool).sum())
+    return (
+        evaluated_count,
+        signal_count,
+        signal_count / evaluated_count if evaluated_count else None,
+    )
+
+
 @dataclass(frozen=True)
 class BaselineLimits:
     """Fixed I-chart and MR-chart limits calculated from baseline measurements."""

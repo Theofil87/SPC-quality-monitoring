@@ -7,6 +7,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.spc_monitoring import summarize_signal_coverage
+
 
 MOVING_RANGE_D2 = 1.128
 DEFAULT_NEAR_ZERO_TOLERANCE = 0.001
@@ -101,6 +103,8 @@ def calculate_capability(
         "distance_mean_to_LSL": None,
         "distance_mean_to_USL": None,
         "spc_signal_count": 0,
+        "spc_evaluated_count": 0,
+        "spc_not_evaluated_count": int(len(measurements)),
         "spc_signal_rate": None,
         "stability_signal_status": "SPC_SIGNALS_NOT_ASSESSED",
         "availability_status": "UNAVAILABLE",
@@ -169,16 +173,24 @@ def calculate_capability(
 
     measurement_count = len(values)
     mean = float(values.mean())
+    evaluated_count, signal_count, signal_rate = summarize_signal_coverage(
+        measurements["spc_signal"]
+    )
     result.update(
         mean=mean,
         median=float(values.median()),
         min=float(values.min()),
         max=float(values.max()),
-        spc_signal_count=int(measurements["spc_signal"].fillna(False).astype(bool).sum()),
+        spc_signal_count=signal_count,
+        spc_evaluated_count=evaluated_count,
+        spc_not_evaluated_count=measurement_count - evaluated_count,
     )
-    result["spc_signal_rate"] = result["spc_signal_count"] / measurement_count
+    result["spc_signal_rate"] = signal_rate
     result["stability_signal_status"] = (
-        "SPC_SIGNALS_PRESENT" if result["spc_signal_count"] else "NO_SPC_SIGNALS_DETECTED"
+        "SPC_SIGNALS_PRESENT" if signal_count
+        else "SPC_SIGNALS_NOT_ASSESSED" if not evaluated_count
+        else "SPC_SIGNALS_PARTIALLY_ASSESSED" if evaluated_count < measurement_count
+        else "NO_SPC_SIGNALS_DETECTED"
     )
 
     overall_sigma = None
@@ -260,6 +272,7 @@ def describe_capability_groups(
             group_key = (group_key,)
         summary = dict(zip(group_columns, group_key))
         measurement_count = len(group)
+        evaluated_count, signal_count, signal_rate = summarize_signal_coverage(group["spc_signal"])
         summary.update(
             measurement_count=measurement_count,
             mean=float(group["measured_value"].mean()),
@@ -271,8 +284,10 @@ def describe_capability_groups(
             above_USL_count=int(group["above_usl"].fillna(False).sum()),
             OOS_count=int(group["is_oos"].fillna(False).sum()),
             OOS_rate=float(group["is_oos"].fillna(False).sum() / measurement_count),
-            spc_signal_count=int(group["spc_signal"].fillna(False).sum()),
-            spc_signal_rate=float(group["spc_signal"].fillna(False).sum() / measurement_count),
+            spc_signal_count=signal_count,
+            spc_evaluated_count=evaluated_count,
+            spc_not_evaluated_count=measurement_count - evaluated_count,
+            spc_signal_rate=signal_rate,
         )
         summaries.append(summary)
 

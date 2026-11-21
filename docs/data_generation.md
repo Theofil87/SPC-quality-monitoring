@@ -221,7 +221,7 @@ overnight `SHIFT_03` from a time-of-day comparison alone. Additional
 indexes are not presumed necessary; use `EXPLAIN (ANALYZE, BUFFERS)` on
 representative queries before adding any.
 
-## SPC rules (initial Phase I analysis)
+## SPC rules and baseline coverage
 
 [`sql/analysis/spc_rules.sql`](../sql/analysis/spc_rules.sql) applies the
 first individual/moving-range (I-MR) analysis to `BOOTH_01` and `A-L1`
@@ -240,7 +240,8 @@ partition by this actual shift-instance key. The first measurement in
 each instance has a NULL moving range; subsequent ranges are the absolute
 difference from the previous ordered observation in that same instance.
 
-The center line is the mean of the selected observations. The I-chart
+For the historic exploratory analysis, the center line was the mean of the
+selected observations. The I-chart
 sigma estimate is average within-instance moving range divided by 1.128;
 limits are `CL +/- 3 * sigma_hat`. The moving-range average pools adjacent
 within-shift pairs across the selected history. These limits are SPC
@@ -265,10 +266,20 @@ continues. `sql/analysis/test_spc_rules.sql` exercises threshold, side,
 boundary, reset, moving-range, and deterministic-order behavior with
 inline SQL fixtures.
 
-This is an exploratory Phase I baseline estimated from the same full
-selected history being assessed. Its center line and sigma can therefore
-be influenced by special causes; a reviewed stable reference period and
-fixed Phase II limits would be needed for production monitoring. The
+The old exploratory Phase I baseline was estimated from the same full
+selected history being assessed, yielding 174 signals. The current view uses
+stored baseline limits and their effective interval instead; the canonical
+bootstrap yields 267 signals over 4,200 evaluated observations, with 450 not
+evaluated. Baseline-less rows have `spc_signal = NULL` and
+`spc_evaluation_status = 'NOT_EVALUATED'`; rule flags remain false because
+no rule was applied. SPC and per-rule rates use evaluated measurements only,
+while OOS rates retain all measurements as their denominator.
+
+The synthetic baseline fitting window has not been established as stable:
+retrospective application of its own fitted limits flagged seven observations.
+Signals require investigation and do not themselves prove special causes.
+A reviewed stable reference period and fixed Phase II limits would be needed
+for production monitoring; the bootstrap's automatic approval is demo metadata. The
 detector does not read `fact_process_event`; that synthetic ground truth
 is reserved for retrospective validation after signals are produced.
 
@@ -296,7 +307,7 @@ matches those source records.
 
 ## SPC signal summary and diagnostics
 
-[`sql/views.sql`](../sql/views.sql) exposes the unchanged initial rule
+[`sql/views.sql`](../sql/views.sql) exposes the baseline-based rule
 results as `v_spc_rule_results_booth01_a_l1`. It retains one row per
 eligible `measurement_id`; [`sql/analysis/spc_rules.sql`](../sql/analysis/spc_rules.sql)
 is the ordered detail query over that view. The summary in
@@ -312,9 +323,9 @@ alone repeats across production days and is not a concrete shift key.
 Rule-specific results are long-form for Rules 1-4 at overall, month, and
 shift-instance scope.
 
-All counts use distinct `measurement_id`; rates use the total eligible
-measurements in the corresponding scope as their denominator. Overall
-signal status is the OR of Rules 1-4, so a measurement triggering multiple
+All counts use distinct `measurement_id`; SPC rates use evaluated measurements
+in the corresponding scope as their denominator. For evaluated measurements,
+overall signal status is the OR of Rules 1-4, so a measurement triggering multiple
 rules counts once in the overall signal count. Individual rule counts
 are allowed to overlap and must not be added to estimate the total signal
 count. OOS measurements and rates use `is_oos` independently of SPC rule
@@ -322,7 +333,7 @@ flags; an OOS result is not required for a signal, nor does an SPC signal
 imply an OOS result.
 
 An SPC signal means that one or more configured rules flagged an
-observation under the exploratory Phase I limits. It is a diagnostic
+observation under its assigned baseline limits. It is a diagnostic
 prompt for investigation, not proof of a special cause or evidence of a
 specific root cause. `fact_process_event` remains reserved for subsequent
 retrospective validation and is not an input to detection or aggregation.
@@ -424,8 +435,8 @@ alone.
 
 [`sql/analysis/drift_shift_summaries.sql`](../sql/analysis/drift_shift_summaries.sql)
 provides reproducible monthly, actual-shift-instance, and shift-type outputs,
-plus sufficient statistics for variation decomposition. Each rate uses the
-measurement count in that same scope as its denominator. A rule-specific count
+plus sufficient statistics for variation decomposition. SPC rates use the
+evaluated count, while OOS rates use all measurements in the scope. A rule-specific count
 may overlap another rule; `spc_signal` remains the existing OR flag and is the
 only overall-signal count.
 
@@ -480,7 +491,7 @@ making claims about an operating paintshop.
 [`notebooks/drift_shift_variation_analysis.ipynb`](../notebooks/drift_shift_variation_analysis.ipynb)
 is the reproducible walkthrough. Its SQL and Python assertions require 4,650
 unique measurements, 465 actual instances of 10 measurements, 56 OOS results,
-174 signal-bearing measurements, reconciliation across all groupings, correct
+coverage and signal reconciliation across all groupings, correct
 overnight assignment, and `Total SS ≈ Within SS + Between SS`.
 
 ## Phase 4 owner review

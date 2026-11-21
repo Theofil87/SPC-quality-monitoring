@@ -1,11 +1,49 @@
+\set ON_ERROR_STOP on
+
+DO $$
+BEGIN
+    IF EXISTS (
+        WITH spc AS MATERIALIZED (
+            SELECT * FROM v_spc_rule_results_booth01_a_l1
+        ), input AS MATERIALIZED (
+            SELECT * FROM v_capability_measurements_booth01_a_l1
+        ), source AS MATERIALIZED (
+            SELECT measurement.measurement_id, measurement.is_oos,
+                   spc.spc_signal, spc.baseline_id, spc.spc_evaluation_status
+            FROM v_measurement_enriched AS measurement
+            JOIN spc USING (measurement_id)
+            WHERE measurement.booth_name = 'BOOTH_01'
+              AND measurement.point_code = 'A-L1'
+              AND measurement.characteristic = 'Coating Thickness'
+              AND measurement.unit = 'um'
+              AND measurement.lsl = 70 AND measurement.target = 75 AND measurement.usl = 80
+        )
+        SELECT 1
+        FROM input FULL JOIN source USING (measurement_id)
+        WHERE source.measurement_id IS NULL OR input.measurement_id IS NULL
+           OR input.is_oos IS DISTINCT FROM source.is_oos
+           OR input.spc_signal IS DISTINCT FROM source.spc_signal
+           OR input.baseline_id IS DISTINCT FROM source.baseline_id
+           OR input.spc_evaluation_status IS DISTINCT FROM source.spc_evaluation_status
+    ) OR EXISTS (
+        SELECT 1 FROM v_capability_measurements_booth01_a_l1
+        GROUP BY measurement_id HAVING count(*) <> 1
+    ) THEN
+        RAISE EXCEPTION 'Capability input does not reconcile with source measurements and SPC coverage';
+    END IF;
+END
+$$;
+
 -- Reconcile the capability input view to the measurement-level source and SPC flags.
-WITH source AS (
+WITH spc AS MATERIALIZED (
+    SELECT * FROM v_spc_rule_results_booth01_a_l1
+), source AS MATERIALIZED (
     SELECT
         measurement.measurement_id,
         measurement.is_oos,
         spc.spc_signal
     FROM v_measurement_enriched AS measurement
-    JOIN v_spc_rule_results_booth01_a_l1 AS spc USING (measurement_id)
+    JOIN spc USING (measurement_id)
     WHERE measurement.booth_name = 'BOOTH_01'
       AND measurement.point_code = 'A-L1'
       AND measurement.characteristic = 'Coating Thickness'
@@ -13,7 +51,7 @@ WITH source AS (
       AND measurement.lsl = 70
       AND measurement.target = 75
       AND measurement.usl = 80
-), capability_input AS (
+), capability_input AS MATERIALIZED (
     SELECT *
     FROM v_capability_measurements_booth01_a_l1
 ), comparison AS (

@@ -100,6 +100,20 @@ def test_shift_type_pooling_preserves_supplied_spc_flags():
     assert shift_type["spc_signal_rate"].tolist() == [0.5, 1.0]
 
 
+def test_signal_rates_use_only_evaluated_measurements():
+    data = _measurements(
+        [1, 3, 5, 7],
+        production_months=["2026-01-01"] * 2 + ["2026-02-01"] * 2,
+    )
+    data["spc_signal"] = [True, False, None, None]
+    monthly = summarize_drift_shift_inputs(data)["monthly"]
+
+    assert monthly["spc_evaluated_count"].tolist() == [2, 0]
+    assert monthly["spc_not_evaluated_count"].tolist() == [0, 2]
+    assert monthly["spc_signal_rate"].iloc[0] == pytest.approx(0.5)
+    assert pd.isna(monthly["spc_signal_rate"].iloc[1])
+
+
 def test_rolling_windows_are_chronological_and_require_full_window():
     summary = pd.DataFrame(
         {"shift_instance": pd.date_range("2026-01-01", periods=4, freq="D")[::-1], "mean": [4, 3, 2, 1]}

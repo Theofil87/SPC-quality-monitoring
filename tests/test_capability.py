@@ -166,3 +166,33 @@ def test_group_summaries_remain_descriptive_for_small_groups():
     assert summaries["measurement_count"].tolist() == [1, 1]
     assert summaries["sample_std"].isna().all()
     assert not {"Cp", "Cpk", "Pp", "Ppk"}.intersection(summaries.columns)
+
+
+def test_signal_rates_exclude_unassessed_and_preserve_no_coverage():
+    measurements = _measurements([4, 5, 6, 7])
+    measurements["spc_signal"] = [True, False, None, None]
+    measurements["production_month"] = ["2026-01"] * 2 + ["2026-02"] * 2
+    result = calculate_capability(measurements)
+    groups = describe_capability_groups(measurements, ["production_month"])
+
+    assert result["spc_evaluated_count"] == 2
+    assert result["spc_not_evaluated_count"] == 2
+    assert result["spc_signal_rate"] == pytest.approx(0.5)
+    assert groups["spc_evaluated_count"].tolist() == [2, 0]
+    assert groups["spc_signal_rate"].iloc[0] == pytest.approx(0.5)
+    assert pd.isna(groups["spc_signal_rate"].iloc[1])
+
+    measurements["spc_signal"] = [None] * 4
+    no_coverage = calculate_capability(measurements)
+    assert no_coverage["spc_signal_rate"] is None
+    assert no_coverage["stability_signal_status"] == "SPC_SIGNALS_NOT_ASSESSED"
+
+    measurements["spc_signal"] = [False, None, None, None]
+    assert calculate_capability(measurements)["stability_signal_status"] == "SPC_SIGNALS_PARTIALLY_ASSESSED"
+
+
+def test_invalid_spc_signal_is_not_silently_counted():
+    measurements = _measurements([4, 6])
+    measurements["spc_signal"] = [False, "false"]
+    with pytest.raises(ValueError, match="spc_signal"):
+        calculate_capability(measurements)
